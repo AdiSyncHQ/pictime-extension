@@ -1,0 +1,1017 @@
+// background.js
+// Core background script for Pic-Time → GCP migration extension.
+
+"use strict";
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/** Storage key for auth token used with backend. */
+const AUTH_KEY = "pts_auth_token";
+
+/** Maximum number of parallel uploads. */
+const CONCURRENCY = 3; // recommended safe default
+
+/** Minimum jitter delay (ms) between requests. */
+const JITTER_MIN = 150;
+
+/** Maximum jitter delay (ms) between requests. */
+const JITTER_MAX = 350;
+
+/** Max retry attempts for individual upload. */
+const MAX_RETRIES = 3;
+
+/** Storage key: last captured dashboard payload. */
+const KEY_LAST = "pts_last";
+
+/** Storage key: extracted galleries list. */
+const KEY_GALLERIES = "pts_galleries";
+
+/** Storage key: dashboard capture history. */
+const KEY_HISTORY = "pts_history";
+
+/** Storage key: current transfer state. */
+const KEY_TRANSFER = "pts_transfer_state";
+
+/** Maximum number of history entries stored. */
+const HISTORY_MAX = 20;
+
+/** Storage key: last completed run snapshot. */
+const KEY_LAST_RUN = "pts_last_run";
+
+/** Storage key: ALL failures across a transfer-all run. */
+const KEY_ALL_FAILURES = "pts_all_failures";
+
+/** Backend base URL (Cloud Run). */
+const BACKEND_BASE =
+  "https://migration-backend-223066796377.us-central1.run.app";
+
+// -----------------------------------------------------------------------------
+// Transfer state helpers
+// -----------------------------------------------------------------------------
+
+/**
+ * Returns auth headers for backend calls, if a token is present.
+ * @returns {Promise<object>} Object with "X-PT-Auth" header or empty object.
+ */
+async function getAuthHeader() {
+  const stored = await chrome.storage.local.get(AUTH_KEY);
+  const token = stored[AUTH_KEY];
+  if (!token) return {};
+  return { "X-PT-Auth": token }; // must match backend checkAuth()
+}
+
+/**
+ * Saves the final transfer state snapshot into KEY_LAST_RUN.
+ * Intended to be called when a run completes (single gallery).
+ */
+async function saveFinalRunSnapshot() {
+  const st = (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER];
+  await chrome.storage.local.set({ [KEY_LAST_RUN]: st });
+}
+
+/**
+ * Resets the transfer state to an empty baseline object.
+ * @returns {Promise<object>} The empty transfer state that was stored.
+ */
+async function resetTransferState() {
+  const empty = {
+    running: false,
+    projectId: null,
+    albumName: null,
+    total: 0,
+    completed: 0,
+    successes: [], // [{ filename, skipped, objectPath }]
+    failures: [], // [{ filename, error }]
+    startedAt: null,
+    updatedAt: null,
+    delayMs: 0,
+    domain: null
+  };
+
+  await chrome.storage.local.set({ [KEY_TRANSFER]: empty });
+  return empty;
+}
+
+/**
+ * Applies a shallow patch to the transfer state and updates the updatedAt timestamp.
+ * @param {object} patch - Partial state to merge.
+ * @returns {Promise<object>} The updated state.
+ */
+async function updateTransferState(patch) {
+  const prev =
+    (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] || {};
+  const updated = { ...prev, ...patch, updatedAt: Date.now() };
+  await chrome.storage.local.set({ [KEY_TRANSFER]: updated });
+  return updated;
+}
+
+// Initialize transfer state at startup
+resetTransferState();
+
+// -----------------------------------------------------------------------------
+// Utils
+// -----------------------------------------------------------------------------
+
+/**
+ * Convenience wrapper for background logging.
+ * @param  {...any} args
+ */
+function log(...args) {
+  console.log("[bg]", ...args);
+}
+
+/**
+ * Extracts project/gallery metadata from captured Pic-Time payloads.
+ * @param {object} payload
+ * @returns {Array<{name: string, mediaCount: number, projectId: number, token: string, raw: any}>}
+ */
+function extractProjects(payload) {
+  try {
+    const root = payload?.bodyJson?.d || payload?.d;
+    const list = root?.projects_s || [];
+    return list.map(arr => ({
+      name: arr?.[7] || arr?.[12] || "(unnamed)",
+      mediaCount: arr?.[8] ?? 0,
+      projectId: arr?.[9] ?? 0,
+      token: arr?.[20] ?? arr?.[19] ?? "",
+      raw: arr
+    }));
+  } catch (e) {
+    console.error("[bg] extractProjects error:", e);
+    return [];
+  }
+}
+
+/**
+ * Saves the latest dashboard capture payload and extracts galleries/history.
+ * @param {object} payload
+ */
+async function saveCapture(payload) {
+  const ts = Date.now();
+  const galleries = extractProjects(payload);
+
+  try {
+    const { [KEY_HISTORY]: history = [] } = await chrome.storage.local.get(
+      KEY_HISTORY
+    );
+    const next = Array.isArray(history) ? history.slice(0) : [];
+    next.unshift({ ts, galleries, payload });
+    if (next.length > HISTORY_MAX) next.length = HISTORY_MAX;
+
+    await chrome.storage.local.set({
+      [KEY_LAST]: payload,
+      [KEY_GALLERIES]: galleries,
+      [KEY_HISTORY]: next
+    });
+  } catch (err) {
+    console.error("[bg] saveCapture error:", err);
+  }
+}
+
+/**
+ * Fetch hi-res image from Pic-Time in extension context.
+ * Uses credentials: "include" to respect logged-in session.
+ * @param {string} url
+ * @returns {Promise<Blob>}
+ */
+async function fetchImageFromPicTime(url) {
+  const res = await fetch(url, {
+    method: "GET",
+    credentials: "include"
+  });
+
+  if (!res.ok) {
+    throw new Error(`Pic-Time fetch failed: ${res.status} ${res.statusText}`);
+  }
+
+  return await res.blob();
+}
+
+// -----------------------------------------------------------------------------
+// SIGNED-URL UPLOAD PIPELINE
+// -----------------------------------------------------------------------------
+
+/**
+ * Processes uploads in parallel using a simple worker pool with jitter and retries.
+ *
+ * @param {Array<object>} photos - Photo descriptors { filename, url, scene, photoId, ... }.
+ * @param {string|number} projectId
+ * @param {string} albumName
+ * @param {string|null} domain
+ */
+async function processUploadsInParallel(photos, projectId, albumName, domain) {
+  let state =
+    (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] || {};
+  let successes = state.successes || [];
+  let failures = state.failures || [];
+  let completed = state.completed || 0;
+
+  // per-image delay (user config)
+  const delayMs = Number(state.delayMs) || 0;
+  const effectiveDomain = domain || state.domain || null;
+
+  /**
+   * Returns a Promise that resolves after a small, random delay.
+   * Helps avoid burst patterns that might trigger captchas.
+   * @returns {Promise<void>}
+   */
+  function jitter() {
+    const delay = JITTER_MIN + Math.random() * (JITTER_MAX - JITTER_MIN);
+    return new Promise(resolve => setTimeout(resolve, delay));
+  }
+
+  /**
+   * Upload a single photo with retry and exponential backoff,
+   * using SIGNED URL ONLY from the backend.
+   *
+   * @param {object} photo
+   * @param {string|null} domainForPath
+   * @returns {Promise<{ok: boolean, skipped?: boolean, objectPath?: string|null, error?: string}>}
+   */
+  async function uploadOne(photo, domainForPath) {
+    const filename = photo.filename;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        // 1) User-config delay (to avoid captchas)
+        if (delayMs > 0) {
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+
+        // 2) Small jitter to avoid burst patterns
+        await jitter();
+
+        // 3) Ask backend for signed URL *or* "skipped"
+        const authHeaders = await getAuthHeader();
+
+        const metaResp = await fetch(`${BACKEND_BASE}/api/get-upload-url`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeaders
+          },
+          body: JSON.stringify({
+            filename,
+            albumName,
+            projectId: String(projectId),
+            // domain is optional for backend; safe to send
+            domain: domainForPath || undefined
+          })
+        });
+
+        const metaJson = await metaResp.json().catch(() => ({}));
+        if (!metaResp.ok || !metaJson.ok) {
+          throw new Error(
+            metaJson?.error || `Signed URL error (HTTP ${metaResp.status})`
+          );
+        }
+
+        // 4) If backend says "skipped" → no upload, treat as success
+        if (metaJson.skipped) {
+          return {
+            ok: true,
+            skipped: true,
+            objectPath: metaJson.objectPath || null
+          };
+        }
+
+        const uploadUrl = metaJson.uploadUrl;
+        if (!uploadUrl) {
+          throw new Error("Missing uploadUrl from backend");
+        }
+
+        // 5) Only now fetch bytes from Pic-Time
+        const blob = await fetchImageFromPicTime(photo.url);
+
+        // 6) PUT directly to GCS using signed URL
+        const putResp = await fetch(uploadUrl, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/octet-stream"
+          },
+          body: blob
+        });
+
+        if (!putResp.ok) {
+          throw new Error(`GCS upload failed: HTTP ${putResp.status}`);
+        }
+
+        // 7) Tell backend to attach custom metadata (scene, photoId, etc.)
+        try {
+          const authHeaders2 = await getAuthHeader();
+          await fetch(`${BACKEND_BASE}/api/set-image-metadata`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...authHeaders2
+            },
+            body: JSON.stringify({
+              filename,
+              albumName,
+              projectId: String(projectId),
+              scene: photo.scene || "",
+              photoId: String(photo.photoId ?? ""),
+              domain: domainForPath || "" // <--- IMPORTANT
+            })
+          });
+        } catch (metaErr) {
+          console.warn("Non-fatal: failed to set image metadata", metaErr);
+          // we don't fail the whole upload because of metadata
+        }
+
+        return {
+          ok: true,
+          skipped: false,
+          objectPath: metaJson.objectPath || null
+        };
+      } catch (err) {
+        console.warn(`Retry ${attempt}/${MAX_RETRIES} for ${filename}`, err);
+
+        if (attempt === MAX_RETRIES) {
+          return { ok: false, error: String(err) };
+        }
+
+        // exponential backoff before retry
+        await new Promise(resolve => setTimeout(resolve, 500 * attempt));
+      }
+    }
+  }
+
+  // Worker pool
+  let index = 0;
+  const pool = Array(CONCURRENCY)
+    .fill(0)
+    .map(async () => {
+      while (index < photos.length) {
+        const photo = photos[index++];
+        const filename = photo.filename;
+
+        const result = await uploadOne(photo, effectiveDomain);
+
+        if (result.ok) {
+          // success
+          successes.push({
+            filename,
+            skipped: !!result.skipped,
+            objectPath: result.objectPath
+          });
+        } else {
+          // local album-level failure
+          failures.push({
+            filename,
+            error: result.error
+          });
+
+          // global failure list (for transfer-all runs)
+          const stored = await chrome.storage.local.get(KEY_ALL_FAILURES);
+          const allFails = stored[KEY_ALL_FAILURES] || [];
+
+          allFails.push({
+            filename,
+            error: result.error,
+            projectId,
+            albumName
+          });
+
+          await chrome.storage.local.set({ [KEY_ALL_FAILURES]: allFails });
+        }
+
+        completed++;
+
+        await updateTransferState({
+          completed,
+          successes,
+          failures
+        });
+      }
+    });
+
+  // Wait for all workers to finish
+  await Promise.all(pool);
+}
+
+// -----------------------------------------------------------------------------
+// MAIN MESSAGE ROUTER
+// -----------------------------------------------------------------------------
+
+/**
+ * Main runtime message handler for the background script.
+ * Handles all coordination between popup, content scripts, and backend.
+ */
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  (async () => {
+    try {
+      // -----------------------------------------------------------------------
+      // Clears ONLY the active transfer state (not history)
+      // -----------------------------------------------------------------------
+      if (msg?.type === "CLEAR_ACTIVE_TRANSFER_ONLY") {
+        const empty = {
+          running: false,
+          projectId: null,
+          albumName: null,
+          total: 0,
+          completed: 0,
+          successes: [],
+          failures: [],
+          startedAt: null,
+          updatedAt: null,
+          delayMs: 0,
+          domain: null
+        };
+        await chrome.storage.local.set({ [KEY_TRANSFER]: empty });
+        sendResponse?.({ ok: true });
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // Clears ONLY the SAVED last-run summary
+      // -----------------------------------------------------------------------
+      if (msg?.type === "CLEAR_LAST_RUN_ONLY") {
+        await chrome.storage.local.set({ [KEY_LAST_RUN]: { total: 0 } });
+        sendResponse?.({ ok: true });
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // 0) BULK: transfer all galleries (runs fully in background)
+      // -----------------------------------------------------------------------
+      if (msg?.type === "TRANSFER_ALL_GALLERIES") {
+        const { domain, delayMs } = msg;
+
+        // reset global failures for this multi-album run
+        await chrome.storage.local.set({ [KEY_ALL_FAILURES]: [] });
+
+        const data = await chrome.storage.local.get(KEY_GALLERIES);
+        let galleries = data[KEY_GALLERIES] || [];
+        galleries = galleries.filter(g => (g.mediaCount || 0) > 0);
+
+        if (!galleries.length) {
+          sendResponse?.({
+            ok: false,
+            error: "No galleries with media to transfer."
+          });
+          return;
+        }
+
+        // fire-and-forget loop
+        (async () => {
+          const safeDelay = Number(delayMs);
+          const perImageDelay =
+            Number.isFinite(safeDelay) && safeDelay > 0
+              ? Math.floor(safeDelay)
+              : 0;
+
+          const overallStartedAt = Date.now();
+          let globalTotal = 0;
+
+          for (const g of galleries) {
+            // wait until any existing transfer is done
+            while (true) {
+              const st =
+                (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] ||
+                {};
+              if (!st.running) break;
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+
+            const count = Number(g.mediaCount || 0);
+            globalTotal += count;
+
+            await updateTransferState({
+              running: true,
+              projectId: g.projectId,
+              albumName: g.name,
+              total: count,
+              completed: 0,
+              successes: [],
+              failures: [],
+              startedAt: Date.now(),
+              delayMs: perImageDelay,
+              domain
+            });
+
+            const galleryUrl = `https://${domain}.pic-time.com/professional#dash|prj_${g.projectId}|photos`;
+
+            const [tab] = await chrome.tabs.query({
+              active: true,
+              currentWindow: true
+            });
+
+            let targetTabId;
+            if (tab?.id) {
+              await chrome.tabs.update(tab.id, { url: galleryUrl });
+              targetTabId = tab.id;
+            } else {
+              const newTab = await chrome.tabs.create({ url: galleryUrl });
+              targetTabId = newTab.id;
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 2500));
+
+            chrome.tabs.sendMessage(targetTabId, {
+              type: "FETCH_AND_TRANSFER",
+              projectId: g.projectId,
+              albumName: g.name,
+              count
+              // delayMs and domain carried via KEY_TRANSFER
+            });
+
+            // wait until this gallery finishes
+            while (true) {
+              const st =
+                (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] ||
+                {};
+              if (!st.running) break;
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          }
+
+          // 🌟 AFTER ALL ALBUMS FINISH, build a proper "last run" summary
+          const storedFailsObj = await chrome.storage.local.get(
+            KEY_ALL_FAILURES
+          );
+          const allFailures = storedFailsObj[KEY_ALL_FAILURES] || [];
+          const totalFailed = allFailures.length;
+
+          const lastRunSummary = {
+            running: false,
+            projectId: totalFailed === 1 ? allFailures[0].projectId : "—",
+            albumName:
+              totalFailed > 1
+                ? "Multiple albums"
+                : allFailures[0]?.albumName || "—",
+            total: globalTotal,
+            completed: globalTotal,
+            successes: [], // we only track failures globally
+            failures: allFailures,
+            startedAt: overallStartedAt,
+            updatedAt: Date.now(),
+            delayMs: perImageDelay,
+            domain,
+
+            // extra helpers
+            allFailures,
+            totalFailed
+          };
+
+          await chrome.storage.local.set({ [KEY_LAST_RUN]: lastRunSummary });
+        })().catch(e =>
+          console.error("TRANSFER_ALL_GALLERIES loop error", e)
+        );
+
+        sendResponse?.({ ok: true, started: true });
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // 1) START TRANSFER: from popup (single gallery)
+      // -----------------------------------------------------------------------
+      if (msg?.type === "TRANSFER_TO_GCP") {
+        const { gallery, count, domain, delayMs } = msg;
+
+        const state =
+          (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER];
+        if (state?.running) {
+          sendResponse?.({
+            ok: false,
+            error: "Another transfer is already running."
+          });
+          return;
+        }
+
+        const safeDelay = Number(delayMs);
+        const perImageDelay =
+          Number.isFinite(safeDelay) && safeDelay > 0
+            ? Math.floor(safeDelay)
+            : 0;
+
+        await updateTransferState({
+          running: true,
+          projectId: gallery.projectId,
+          albumName: gallery.name,
+          total: count,
+          completed: 0,
+          successes: [],
+          failures: [],
+          startedAt: Date.now(),
+          delayMs: perImageDelay,
+          domain
+        });
+
+        const galleryUrl = `https://${domain}.pic-time.com/professional#dash|prj_${gallery.projectId}|photos`;
+
+        const [tab] = await chrome.tabs.query({
+          active: true,
+          currentWindow: true
+        });
+
+        let targetTabId;
+        if (tab?.id) {
+          await chrome.tabs.update(tab.id, { url: galleryUrl });
+          targetTabId = tab.id;
+        } else {
+          const newTab = await chrome.tabs.create({ url: galleryUrl });
+          targetTabId = newTab.id;
+        }
+
+        // wait for page to load a bit
+        await new Promise(resolve => setTimeout(resolve, 2500));
+
+        chrome.tabs.sendMessage(targetTabId, {
+          type: "FETCH_AND_TRANSFER",
+          projectId: gallery.projectId,
+          albumName: gallery.name,
+          count
+        });
+
+        sendResponse?.({ ok: true });
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // 1B) RETRY FAILED IMAGES FROM LAST RUN
+      // -----------------------------------------------------------------------
+            // -----------------------------------------------------------------------
+      // 1B) RETRY FAILED IMAGES FROM LAST RUN
+      // -----------------------------------------------------------------------
+      if (msg?.type === "RETRY_FAILED_UPLOADS") {
+        // Last run snapshot
+        const lastRun =
+          (await chrome.storage.local.get(KEY_LAST_RUN))[KEY_LAST_RUN] || {};
+
+        // Use multi-album list if present, otherwise fallback to normal failures[]
+        const globalFails = lastRun.allFailures || lastRun.failures || [];
+
+        if (!Array.isArray(globalFails) || !globalFails.length) {
+          sendResponse?.({
+            ok: false,
+            error: "No failed images in the last run."
+          });
+          return;
+        }
+
+        // Group by projectId + albumName so we can retry per-album
+        const groups = {};
+        for (const f of globalFails) {
+          if (!f || !f.filename || !f.projectId || !f.albumName) continue;
+          const key = `${f.projectId}::${f.albumName}`;
+          if (!groups[key]) {
+            groups[key] = {
+              projectId: f.projectId,
+              albumName: f.albumName,
+              filenames: []
+            };
+          }
+          groups[key].filenames.push(f.filename);
+        }
+
+        const domain = msg.domain || lastRun.domain;
+        const safeDelay = Number(msg.delayMs ?? lastRun.delayMs ?? 0);
+        const perImageDelay =
+          Number.isFinite(safeDelay) && safeDelay > 0
+            ? Math.floor(safeDelay)
+            : 0;
+
+        if (!domain) {
+          sendResponse?.({
+            ok: false,
+            error: "Missing domain for retry."
+          });
+          return;
+        }
+
+        const state =
+          (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER];
+        if (state?.running) {
+          sendResponse?.({
+            ok: false,
+            error: "A transfer is currently running. Wait for it to finish."
+          });
+          return;
+        }
+
+        // Fire-and-forget loop over each album with failures
+        (async () => {
+          const groupKeys = Object.keys(groups);
+
+          for (const key of groupKeys) {
+            const { projectId, albumName, filenames } = groups[key];
+            if (!filenames.length) continue;
+
+            // wait until any existing transfer is done
+            while (true) {
+              const st =
+                (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] ||
+                {};
+              if (!st.running) break;
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+
+            // set transfer state for this retry batch
+            await updateTransferState({
+              running: true,
+              projectId,
+              albumName,
+              total: filenames.length,
+              completed: 0,
+              successes: [],
+              failures: [],
+              startedAt: Date.now(),
+              delayMs: perImageDelay,
+              domain
+            });
+
+            const galleryUrl = `https://${domain}.pic-time.com/professional#dash|prj_${projectId}|photos`;
+
+            const [tab] = await chrome.tabs.query({
+              active: true,
+              currentWindow: true
+            });
+
+            let targetTabId;
+            if (tab?.id) {
+              await chrome.tabs.update(tab.id, { url: galleryUrl });
+              targetTabId = tab.id;
+            } else {
+              const newTab = await chrome.tabs.create({ url: galleryUrl });
+              targetTabId = newTab.id;
+            }
+
+            // allow page to load
+            await new Promise(resolve => setTimeout(resolve, 2500));
+
+            chrome.tabs.sendMessage(targetTabId, {
+              type: "FETCH_AND_TRANSFER",
+              projectId,
+              albumName,
+              count: filenames.length,
+              failedFilenames: filenames // content script filters to only these
+            });
+
+            // wait until this album's retry finishes
+            while (true) {
+              const st =
+                (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] ||
+                {};
+              if (!st.running) break;
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          }
+        })().catch(e =>
+          console.error("RETRY_FAILED_UPLOADS loop error", e)
+        );
+
+        sendResponse?.({ ok: true, started: true });
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // 2) RECEIVED METADATA BATCH: from content script
+      // -----------------------------------------------------------------------
+      if (msg?.type === "START_UPLOAD_BATCH") {
+        const { projectId, albumName, virtualPath, fullMetadata, photos } = msg;
+
+        if (!Array.isArray(photos) || !photos.length) {
+          sendResponse?.({
+            ok: false,
+            error: "No photos provided to upload."
+          });
+          return;
+        }
+
+        // read existing state to preserve delayMs + domain
+        const currentState =
+          (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] || {};
+        const delayMs = currentState.delayMs || 0;
+        const domain = currentState.domain || null;
+
+        // Init transfer state for this batch
+        await updateTransferState({
+          running: true,
+          projectId,
+          albumName,
+          total: photos.length,
+          completed: 0,
+          successes: [],
+          failures: [],
+          startedAt: Date.now(),
+          delayMs,
+          domain
+        });
+
+        // STEP 1 — Upload metadata JSON to GCP (album.json)
+        try {
+          const authHeaders = await getAuthHeader();
+
+          console.log("FULL META DATA FETCHED:", fullMetadata);
+          await fetch(`${BACKEND_BASE}/api/create-album`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...authHeaders
+            },
+            body: JSON.stringify({
+              projectId,
+              albumName,
+              virtualPath,
+              totalPhotos: photos.length,
+              fullMetadata: fullMetadata || {},
+              domain // comes from currentState.domain above
+            })
+          });
+        } catch (err) {
+          console.error("Failed to create album.json", err);
+        }
+
+        // STEP 2 — Continue with image uploads via SIGNED URLs
+        (async () => {
+          await processUploadsInParallel(photos, projectId, albumName, domain);
+          await updateTransferState({ running: false });
+          await saveFinalRunSnapshot(); // normal single-gallery snapshot
+        })();
+
+        sendResponse?.({ ok: true, started: true, total: photos.length });
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // 3) POPUP: get transfer state
+      // -----------------------------------------------------------------------
+      if (msg?.type === "GET_TRANSFER_STATE") {
+        const state =
+          (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] || null;
+        sendResponse?.({ ok: true, state });
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // 4) POPUP: clear logs (transfer state)
+      // -----------------------------------------------------------------------
+      if (msg?.type === "CLEAR_TRANSFER_LOG") {
+        const empty = await resetTransferState();
+        sendResponse?.({ ok: true, state: empty });
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // 5) EXISTING DOWNLOAD / DASHBOARD LOGIC
+      // -----------------------------------------------------------------------
+
+      if (msg?.type === "DOWNLOAD_AND_UPLOAD") {
+        sendResponse?.({
+          ok: false,
+          error: "DOWNLOAD_AND_UPLOAD is deprecated in this version."
+        });
+        return;
+      }
+
+      // Standard "Download" button flow
+      if (msg?.type === "DOWNLOAD_IMAGES") {
+        const { gallery, count, domain } = msg;
+        log(
+          "[bg] Download request for",
+          gallery.name,
+          "count",
+          count,
+          "domain",
+          domain
+        );
+
+        const galleryUrl = `https://${domain}.pic-time.com/professional#dash|prj_${gallery.projectId}|photos`;
+
+        const [tab] = await chrome.tabs.query({
+          active: true,
+          currentWindow: true
+        });
+
+        let targetTabId;
+        if (tab?.id) {
+          await chrome.tabs.update(tab.id, { url: galleryUrl });
+          targetTabId = tab.id;
+        } else {
+          const newTab = await chrome.tabs.create({ url: galleryUrl });
+          targetTabId = newTab.id;
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 2500));
+
+        await chrome.tabs.sendMessage(targetTabId, {
+          type: "FETCH_PROJECT_PHOTOS",
+          projectId: gallery.projectId,
+          token: gallery.token,
+          count
+        });
+
+        sendResponse?.({ ok: true });
+        return;
+      }
+
+      // Receive URLs & trigger browser downloads
+      if (msg?.type === "PTS_DOWNLOAD_READY") {
+        const payload = msg.payload || {};
+        let imageUrls = payload.imageUrls || [];
+
+        imageUrls = imageUrls
+          .map(item => {
+            if (typeof item === "string") return item;
+            if (item && typeof item.url === "string") return item.url;
+            return null;
+          })
+          .filter(Boolean);
+
+        imageUrls = [...new Set(imageUrls)];
+
+        if (!imageUrls.length) {
+          console.warn("[bg] No valid image URLs to download");
+          sendResponse?.({ ok: false, error: "no_urls" });
+          return;
+        }
+
+        log("[bg] Downloading (hi-res)", imageUrls.length, "images...");
+        for (const u of imageUrls) {
+          try {
+            await chrome.downloads.download({ url: u });
+          } catch (e) {
+            console.error("[bg] download failed for", u, e);
+          }
+        }
+
+        sendResponse?.({ ok: true, downloaded: imageUrls.length });
+        return;
+      }
+
+      // capture dashboard payload
+      if (msg?.type === "PTS_CAPTURE") {
+        const payload = msg.payload;
+        log(
+          "Received PTS_CAPTURE from tab",
+          sender?.tab?.id,
+          "status",
+          payload?.meta?.status
+        );
+        await saveCapture(payload);
+        sendResponse?.({ ok: true });
+        return;
+      }
+
+      if (msg?.type === "GET_LAST") {
+        const data = await chrome.storage.local.get([KEY_LAST, KEY_GALLERIES]);
+        sendResponse?.({
+          ok: true,
+          last: data[KEY_LAST] ?? null,
+          galleries: data[KEY_GALLERIES] ?? []
+        });
+        return;
+      }
+
+      if (msg?.type === "GET_GALLERIES") {
+        const data = await chrome.storage.local.get(KEY_GALLERIES);
+        sendResponse?.({
+          ok: true,
+          galleries: data[KEY_GALLERIES] ?? []
+        });
+        return;
+      }
+
+      if (msg?.type === "CLEAR_HISTORY") {
+        await chrome.storage.local.remove([
+          KEY_LAST,
+          KEY_GALLERIES,
+          KEY_HISTORY
+        ]);
+        await chrome.storage.local.set({ [KEY_HISTORY]: [] });
+        sendResponse?.({ ok: true });
+        return;
+      }
+
+      if (msg?.type === "OPEN_URL") {
+        const url = msg.url;
+        const [activeTab] = await chrome.tabs.query({
+          active: true,
+          currentWindow: true
+        });
+
+        if (activeTab?.id) {
+          await chrome.tabs.update(activeTab.id, { url });
+          sendResponse?.({ ok: true, tabId: activeTab.id });
+        } else {
+          const tab = await chrome.tabs.create({ url });
+          sendResponse?.({ ok: true, tabId: tab.id });
+        }
+        return;
+      }
+
+      // Fallback for unknown message types
+      log("Unknown message type:", msg?.type);
+      sendResponse?.({ ok: false, error: "unknown_message" });
+    } catch (err) {
+      console.error("[bg] handler error:", err);
+      sendResponse?.({ ok: false, error: String(err) });
+    }
+  })();
+
+  // keep async channel open while async runs
+  return true;
+});
