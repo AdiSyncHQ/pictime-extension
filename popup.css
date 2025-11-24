@@ -1062,6 +1062,177 @@ body.dark .lr-failures {
 }
 
 
+/* Multi-select styles */
+.select-all-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  user-select: none;
+}
+
+.select-all-wrap input {
+  cursor: pointer;
+}
+
+/* Checkbox inside Gallery Card */
+.gallery-check-wrapper {
+  display: flex;
+  align-items: flex-start;
+  padding-top: 2px;
+}
+
+.gallery-checkbox {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+/* Adjust gallery head to accommodate checkbox */
+.gallery-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto; /* Checkbox | Name | Chip */
+  gap: 10px;
+  align-items: start;
+}
+
+.gallery-name {
+  /* Ensure name doesn't break layout */
+  min-width: 0; 
+}
+
+
+
+/* ======================================================
+   MODERN CHECKBOXES (CSS ONLY)
+   Replaces default browser checkboxes with custom UI
+====================================================== */
+
+/* 1. Define the base checkbox style */
+.gallery-checkbox,
+#selectAllBox {
+  /* Reset default browser style */
+  -webkit-appearance: none;
+  appearance: none;
+  
+  /* Box Dimensions & Layout */
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border-subtle);
+  border-radius: 5px; /* Soft rounded corners */
+  background-color: var(--card-bg);
+  margin: 0;
+  cursor: pointer;
+  
+  /* Positioning */
+  display: inline-grid;
+  place-content: center;
+  position: relative;
+  flex-shrink: 0;
+  
+  /* Transitions for smooth interaction */
+  transition: 
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.1s ease;
+}
+
+/* 2. Hover State */
+.gallery-checkbox:hover,
+#selectAllBox:hover {
+  border-color: var(--accent);
+  background-color: rgba(99, 102, 241, 0.05); /* Subtle tint */
+}
+
+/* 3. Checked State (The Purple Box) */
+.gallery-checkbox:checked,
+#selectAllBox:checked {
+  background-color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 2px 5px rgba(99, 102, 241, 0.4); /* Glow effect */
+}
+
+/* 4. The Checkmark Icon (SVG via CSS) */
+.gallery-checkbox::before,
+#selectAllBox::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  transform: scale(0); /* Hidden by default */
+  transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275); /* Bouncy animation */
+  
+  /* White Checkmark SVG */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'%3E%3C/polyline%3E%3C/svg%3E");
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+/* Show checkmark when checked */
+.gallery-checkbox:checked::before,
+#selectAllBox:checked::before {
+  transform: scale(1);
+}
+
+/* 5. Indeterminate State (For "Select All") */
+#selectAllBox:indeterminate {
+  background-color: var(--accent);
+  border-color: var(--accent);
+}
+
+#selectAllBox:indeterminate::before {
+  transform: scale(1);
+  /* White Dash SVG */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='5' y1='12' x2='19' y2='12'%3E%3C/line%3E%3C/svg%3E");
+}
+
+/* 6. Focus State (Accessibility) */
+.gallery-checkbox:focus-visible,
+#selectAllBox:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 7. Disabled State */
+.gallery-checkbox:disabled {
+  background-color: rgba(150, 150, 150, 0.1);
+  border-color: rgba(150, 150, 150, 0.2);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* 8. Layout Fixes for the Header & Card */
+
+/* Ensure the select all row aligns nicely */
+.select-all-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px; /* Space between box and text */
+  font-weight: 500;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+/* Ensure the checkbox inside the card aligns nicely */
+.gallery-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto; /* Box | Name | Count */
+  gap: 12px;
+  align-items: center; /* Vertically center everything */
+}
+
+.gallery-check-wrapper {
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+
+
+
 
 /* -------------------------------
    DARK MODE BUTTON TEXT FIXES
@@ -1121,3 +1292,176 @@ body.dark .url-input input {
     color: var(--text);
   }
   
+
+
+  /* NEW STYLING OVERRIDES */
+
+  /* ======================================================
+   MODERN TRANSFER CONTROL DECK
+   Replaces the old transfer panel styles
+====================================================== */
+
+#transferPanel {
+  background: var(--card-bg); /* Use solid card bg */
+  border: 1px solid var(--border-subtle);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+  border-radius: 16px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 1. Header Row: Title + Clear Button */
+.transfer-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+#transferTitle {
+  margin: 0; /* Reset */
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+#clearTransferBtn {
+  font-size: 10px;
+  padding: 3px 8px;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  color: var(--muted);
+  margin: 0; /* Reset */
+}
+
+/* 2. Progress Bar */
+#transferBarContainer {
+  height: 6px;
+  background: rgba(0,0,0,0.05);
+  margin: 0; /* Reset */
+}
+
+/* 3. Controls Row: Text Info + Big Button */
+.transfer-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.transfer-info {
+  flex: 1;
+  min-width: 0; /* Text truncation fix */
+}
+
+#transferProgress {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+
+#transferEta {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 4. The Modern Button */
+.btn-control {
+  appearance: none;
+  border: none;
+  height: 32px;
+  padding: 0 16px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s cubic-bezier(0.25, 1, 0.5, 1);
+  box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+  white-space: nowrap;
+}
+
+/* State: PAUSE (Running) - Neutral/Soft */
+.btn-control.pause-style {
+  background: #f1f5f9;
+  color: #475569;
+  border: 1px solid #cbd5e1;
+}
+.btn-control.pause-style:hover {
+  background: #e2e8f0;
+  transform: translateY(-1px);
+}
+.btn-control.pause-style::before {
+  content: "⏸";
+  font-size: 10px;
+}
+body.dark .btn-control.pause-style {
+  background: rgba(255,255,255,0.1);
+  border-color: rgba(255,255,255,0.2);
+  color: #e2e8f0;
+}
+
+/* State: RESUME (Paused) - Action Color (Green/Blue) */
+.btn-control.resume-style {
+  background: var(--accent);
+  color: white;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
+}
+.btn-control.resume-style:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+.btn-control.resume-style::before {
+  content: "▶";
+  font-size: 10px;
+}
+
+/* State: WAITING (Network) - Warning Pulse */
+.btn-control.waiting-style {
+  background: #fef2f2;
+  color: #ef4444;
+  border: 1px solid #fecaca;
+  cursor: not-allowed;
+  animation: pulse-border 2s infinite;
+}
+.btn-control.waiting-style::before {
+  content: "⚠️";
+}
+
+/* Animations */
+@keyframes pulse-border {
+  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  70% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+/* Network Error Text */
+.status-network {
+  color: #ef4444 !important;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.status-network::before {
+  content: "";
+  display: block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ef4444;
+}
+
+.status-paused {
+  color: #f59e0b !important; /* Amber */
+}

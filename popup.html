@@ -3,15 +3,12 @@
   <head>
     <meta charset="utf-8" />
     <title>Pic-Time Sniffer</title>
-
-    <!-- CSS ONLY — completely safe -->
     <link rel="stylesheet" href="popup.css" />
   </head>
 
   <body>
     <div class="shell">
       <div class="shell-inner">
-        <!-- Dark Mode Toggle -->
         <button id="darkToggle" aria-label="Toggle dark mode">🌙</button>
 
         <header class="app-header">
@@ -33,7 +30,6 @@
               <span>.pic-time.com/professional#dash</span>
             </div>
           </div>
-
           <button id="startBtn">Start Capture</button>
         </div>
 
@@ -48,17 +44,16 @@
           </button>
         </div>
 
-        <!-- Bulk transfer + delay -->
         <div class="section">
-          <div class="section-label">Bulk transfer</div>
-
+          <div class="section-label">Batch Operations</div>
           <div class="bulk-row" style="display:flex; gap:8px; align-items:center;">
             <button
-              id="transferAllBtn"
+              id="transferSelectedBtn"
               class="btn-secondary"
               style="flex:1;"
+              disabled
             >
-              Transfer all galleries
+              Select galleries...
             </button>
 
             <div class="delay-col" style="display:flex; flex-direction:column; gap:2px; width:120px;">
@@ -78,60 +73,76 @@
               />
             </div>
           </div>
-
           <div class="note">
-            Set a delay between image uploads to reduce captchas. 0 = no delay.
+            Set a delay to reduce captchas. 0 = no delay.
           </div>
         </div>
 
-        <!-- Transfer Panel -->
         <div id="transferPanel">
           <div id="transferTitle">Transfer status</div>
           <div id="transferBarContainer"><div id="transferBar"></div></div>
-          <div id="transferProgress"></div>
-        
-          <!-- NEW: ETA line -->
-          <div id="transferEta" class="transfer-eta" style="font-size:12px; color:#6b7280; margin-top:2px;"></div>
-        
+          
+          <div class="transfer-controls" style="display:flex; justify-content:space-between; align-items:flex-start;">
+             <div>
+                <div id="transferProgress"></div>
+                <div id="transferEta" class="transfer-eta" style="font-size:12px; color:#6b7280; margin-top:2px;"></div>
+             </div>
+             <button id="pauseResumeBtn" class="btn-secondary" style="min-width:70px;">Pause</button>
+          </div>
+
           <div id="transferFailures"></div>
           <button id="clearTransferBtn">✨ Clear transfer log</button>
         </div>
-        <!-- Last run summary (only used when no active transfer) -->
-<!-- Last run summary – redesigned -->
-<div id="lastRunContainer" class="section last-run">
-  <div id="lastRunHeader" class="last-run-header">
-    <div class="lr-title">
-      <span class="lr-dot"></span>
-      Last transfer summary
-    </div>
-    <span id="lastRunChevron" class="lr-chevron">▾</span>
-  </div>
 
-  <div id="lastRunBody" class="last-run-body">
-    <div id="lastRunText" class="lr-text"></div>
-    <div id="lastRunFailuresList" class="lr-failures"></div>
+        <div id="lastRunContainer" class="section last-run">
+          <div id="lastRunHeader" class="last-run-header">
+            <div class="lr-title">
+              <span class="lr-dot"></span>
+              Last transfer summary
+            </div>
+            <span id="lastRunChevron" class="lr-chevron">▾</span>
+          </div>
 
-    <div class="lr-btn-row">
-      <button id="retryFailedBtn" class="btn-secondary lr-btn">Retry failed</button>
-      <button id="clearLastRunBtn" class="btn-secondary lr-btn">Clear summary</button>
-    </div>
-  </div>
-</div>
+          <div id="lastRunBody" class="last-run-body" style="display: none;">
+            <div id="lastRunText" class="lr-text"></div>
+            <div id="lastRunFailuresList" class="lr-failures"></div>
 
+            <div class="lr-btn-row">
+              <button id="retryFailedBtn" class="btn-secondary lr-btn">Retry failed</button>
+              <button id="downloadLogBtn" class="btn-secondary lr-btn" style="display:none;">⬇ Log</button>
+              <button id="clearLastRunBtn" class="btn-secondary lr-btn">Clear summary</button>
+            </div>
+          </div>
+        </div>
 
         <div class="galleries-header">
           <div class="galleries-title">Captured Galleries</div>
+          <div class="select-all-wrap">
+            <input type="checkbox" id="selectAllBox" />
+            <label for="selectAllBox">Select All</label>
+          </div>
         </div>
 
         <div id="galleries"></div>
       </div>
     </div>
-    <div id="advancedToggle">
-  Advanced options ▾
-</div>
 
-<div id="advancedPanel">
-    <div style="margin-bottom:8px; font-size:12px; color:#4b5563;">
+    <div id="advancedToggle">Advanced options ▾</div>
+
+    <div id="advancedPanel">
+      <div style="margin-bottom:4px; font-size:12px; color:#4b5563;">
+        Upload Concurrency (1-10)
+      </div>
+      <input
+        id="concurrencyInput"
+        type="number"
+        min="1"
+        max="10"
+        value="6"
+        style="width:100%; padding:6px 8px; border-radius:8px; border:1px solid #d1d5db; font-size:12px; margin-bottom:12px;"
+      />
+
+      <div style="margin-bottom:8px; font-size:12px; color:#4b5563;">
         Backend auth key
       </div>
       <input
@@ -139,22 +150,13 @@
         type="password"
         placeholder="Paste secret key"
       />
-      <button
-        id="saveAuthBtn"
-      >
-        💾 Save backend auth key
-      </button>
+      <button id="saveAuthBtn">💾 Save backend auth key</button>
 
-  <button id="debugClearStorage">
-    ⚠️ Clear Extension Cache
-  </button>
-</div>
-
+      <button id="debugClearStorage">⚠️ Clear Extension Cache</button>
+    </div>
 
     <div id="toast"></div>
-    
 
-    <!-- EXTERNAL JS ONLY — REQUIRED FOR CSP -->
     <script src="popup.js"></script>
     <script src="ui.js"></script>
   </body>

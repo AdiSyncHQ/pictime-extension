@@ -1,8 +1,7 @@
 console.log("[popup] Ready");
 
-let lastStableEta = "";  // persists between renders
+let lastStableEta = ""; // persists between renders
 let lastRunCollapsed = true;
-
 
 const AUTH_INPUT = document.getElementById("authTokenInput");
 const SAVE_AUTH = document.getElementById("saveAuthBtn");
@@ -23,12 +22,13 @@ const TRANSFER_BAR = document.getElementById("transferBar");
 const TRANSFER_FAILURES = document.getElementById("transferFailures");
 const CLEAR_TRANSFER_BTN = document.getElementById("clearTransferBtn");
 
+// NEW PAUSE BTN (May be null if HTML is not updated)
+const PAUSE_RESUME_BTN = document.getElementById("pauseResumeBtn");
+
 const SUBDOMAIN_KEY = "pts_subdomain";
 const advToggle = document.getElementById("advancedToggle");
 const advPanel = document.getElementById("advancedPanel");
 
-// NEW: bulk + delay
-const TRANSFER_ALL_BTN = document.getElementById("transferAllBtn");
 const DELAY_INPUT = document.getElementById("delayInput");
 const DELAY_KEY = "pts_delay_ms";
 
@@ -41,49 +41,41 @@ const LAST_RUN_FAILURES_LIST = document.getElementById("lastRunFailuresList");
 const RETRY_FAILED_BTN = document.getElementById("retryFailedBtn");
 const CLEAR_LAST_RUN_BTN = document.getElementById("clearLastRunBtn");
 
+const TRANSFER_SELECTED_BTN = document.getElementById("transferSelectedBtn");
+const SELECT_ALL_BOX = document.getElementById("selectAllBox");
+const DOWNLOAD_LOG_BTN = document.getElementById("downloadLogBtn");
+
+
 let transferAllRunning = false;
 
 // --- ETA Helpers --------------------------------------------------------
 
-let lastSpeedSample = null; 
-let lastCompleted    = null;
-let lastTime         = null;
+let lastSpeedSample = null;
+let lastCompleted = null;
+let lastTime = null;
 
 function estimateEta(total, completed) {
   if (!total || completed === 0) return null;
-
   const now = Date.now();
-
-  // First time sample
   if (lastSpeedSample === null) {
     lastSpeedSample = completed;
-    lastCompleted    = completed;
-    lastTime         = now;
+    lastCompleted = completed;
+    lastTime = now;
     return null;
   }
-
-  // Sample every 2 seconds
   if (now - lastTime < 2000) return null;
-
   const deltaCompleted = completed - lastCompleted;
-  const deltaTime = (now - lastTime) / 1000; // seconds
-
+  const deltaTime = (now - lastTime) / 1000;
   if (deltaCompleted <= 0) return null;
-
-  const speed = deltaCompleted / deltaTime; // items per second
+  const speed = deltaCompleted / deltaTime;
   const remaining = total - completed;
-  const etaSeconds = Math.round(remaining / speed);
-
-  // Update for next sample
   lastCompleted = completed;
   lastTime = now;
-
-  return etaSeconds;
+  return Math.round(remaining / speed);
 }
 
 function formatEta(seconds) {
   if (!seconds || seconds <= 0) return "";
-
   if (seconds < 60) return `${seconds}s remaining`;
   const mins = Math.floor(seconds / 60);
   const secs = seconds % 60;
@@ -97,8 +89,6 @@ function escapeHtml(s) {
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
-
-// ---------- Delay helper ----------
 
 function getDelayMs() {
   if (!DELAY_INPUT) return 0;
@@ -122,29 +112,40 @@ async function fetchTransferState() {
 
 function applyTransferStateToButtons(state) {
   const running = !!state?.running;
+  
+  // SAFETY CHECK: Only try to style the button if it exists in HTML
+  if (PAUSE_RESUME_BTN) {
+      PAUSE_RESUME_BTN.style.display = running ? "block" : "none";
+  }
+
   document.querySelectorAll("button").forEach((btn) => {
     if (btn.textContent === "Transfer") {
-      btn.disabled = running || btn.disabled; // keep disabled if input invalid
+      btn.disabled = running || btn.disabled;
     }
   });
+  if (TRANSFER_SELECTED_BTN) {
+    if (running) {
+      TRANSFER_SELECTED_BTN.disabled = true;
+    } else {
+      updateTransferButtonText();
+    }
+  }
 }
 
 function renderTransferPanel(state) {
+  // 1. Hide panel if nothing is happening and no history in state
   if (!state || (!state.running && state.total === 0 && state.completed === 0)) {
-    TRANSFER_PANEL.style.display = "none";
-    // also hide last run if nothing ever ran
+    if (TRANSFER_PANEL) TRANSFER_PANEL.style.display = "none";
     return;
   }
-
-  TRANSFER_PANEL.style.display = "block";
-
-  const { running, albumName, total, completed, successes, failures } = state;
-
+  if (TRANSFER_PANEL) TRANSFER_PANEL.style.display = "flex"; // Changed to flex for new layout
+  
+  const { running, paused, pausedReason, albumName, total, completed, successes, failures } = state;
   const safeTotal = total || 0;
   const safeCompleted = completed || 0;
   const pct = safeTotal > 0 ? Math.round((safeCompleted / safeTotal) * 100) : 0;
 
-  // NEW: reset ETA state when a new run starts (completed=0)
+  // Reset ETA calculation if we just started
   if (running && safeCompleted === 0) {
     lastSpeedSample = null;
     lastCompleted = null;
@@ -152,149 +153,211 @@ function renderTransferPanel(state) {
     lastStableEta = "";
   }
 
-  TRANSFER_BAR.style.width = `${pct}%`;
+  // Update Bar Width
+  if (TRANSFER_BAR) TRANSFER_BAR.style.width = `${pct}%`;
+
+  // --- LOGIC: Handle 3 States (Running, Network Pause, User Pause) ---
 
   if (running) {
-    TRANSFER_PROGRESS.textContent = `Transferring "${albumName || ""}" — ${pct}%`;
+    if (paused) {
+        // --- CASE A: PAUSED ---
+        
+        // Stop animation
+        if (TRANSFER_BAR) {
+            TRANSFER_BAR.style.animation = "none";
+        }
 
-    const etaSeconds = estimateEta(safeTotal, safeCompleted);
+        if (pausedReason === 'network') {
+            // 1. NETWORK PAUSE (Higher Priority)
+            if (TRANSFER_BAR) TRANSFER_BAR.style.backgroundColor = "#ef4444"; // Red Bar
 
-    if (etaSeconds && etaSeconds > 0) {
-      lastStableEta = formatEta(etaSeconds);
+            if (TRANSFER_PROGRESS) {
+                TRANSFER_PROGRESS.className = "status-network"; // Red text class
+                TRANSFER_PROGRESS.textContent = "Waiting for Internet...";
+            }
+            if (TRANSFER_ETA) TRANSFER_ETA.textContent = "Auto-resuming when online";
+
+            if (PAUSE_RESUME_BTN) {
+                PAUSE_RESUME_BTN.textContent = "Connecting...";
+                PAUSE_RESUME_BTN.className = "btn-control waiting-style"; // Pulse Red Style
+                PAUSE_RESUME_BTN.disabled = true;
+            }
+
+        } else {
+            // 2. USER PAUSE
+            if (TRANSFER_BAR) TRANSFER_BAR.style.backgroundColor = "#f59e0b"; // Amber Bar
+
+            if (TRANSFER_PROGRESS) {
+                TRANSFER_PROGRESS.className = "status-paused"; // Amber text
+                TRANSFER_PROGRESS.textContent = "Transfer Paused";
+            }
+            if (TRANSFER_ETA) TRANSFER_ETA.textContent = "Resumed by user action";
+
+            if (PAUSE_RESUME_BTN) {
+                PAUSE_RESUME_BTN.textContent = "Resume";
+                PAUSE_RESUME_BTN.className = "btn-control resume-style"; // Green/Purple Style
+                PAUSE_RESUME_BTN.disabled = false;
+                PAUSE_RESUME_BTN.onclick = async () => {
+                    PAUSE_RESUME_BTN.textContent = "Starting...";
+                    await chrome.runtime.sendMessage({ type: "RESUME_TRANSFER" });
+                };
+            }
+        }
+    } else {
+        // --- CASE B: RUNNING NORMALLY ---
+        
+        if (TRANSFER_BAR) {
+            TRANSFER_BAR.style.backgroundColor = ""; // Default Green gradient
+            TRANSFER_BAR.style.animation = ""; // Restore animation
+        }
+
+        if (TRANSFER_PROGRESS) {
+            TRANSFER_PROGRESS.className = ""; // Reset class
+            TRANSFER_PROGRESS.textContent = `Transferring "${albumName || "Unknown"}"`;
+        }
+
+        // ETA Calculation
+        const etaSeconds = estimateEta(safeTotal, safeCompleted);
+        if (etaSeconds && etaSeconds > 0) lastStableEta = formatEta(etaSeconds);
+        
+        if (TRANSFER_ETA) {
+             TRANSFER_ETA.textContent = `${pct}% completed • ${lastStableEta || "Calculating..."}`;
+        }
+
+        if (PAUSE_RESUME_BTN) {
+            PAUSE_RESUME_BTN.textContent = "Pause";
+            PAUSE_RESUME_BTN.className = "btn-control pause-style"; // Neutral Style
+            PAUSE_RESUME_BTN.disabled = false;
+            PAUSE_RESUME_BTN.onclick = async () => {
+                PAUSE_RESUME_BTN.textContent = "Pausing...";
+                await chrome.runtime.sendMessage({ type: "PAUSE_TRANSFER" });
+            };
+        }
     }
-
-    if (TRANSFER_ETA) TRANSFER_ETA.textContent = lastStableEta;
   } else {
-    TRANSFER_PROGRESS.textContent =
-      `Transfer completed — ${pct}% done (${successes?.length || 0} OK, ${failures?.length || 0} failed)`;
-
-    lastStableEta = "";
-    if (TRANSFER_ETA) TRANSFER_ETA.textContent = "";
+    // --- CASE C: COMPLETED ---
+    if (TRANSFER_PROGRESS) {
+        TRANSFER_PROGRESS.className = "";
+        TRANSFER_PROGRESS.textContent = "Transfer Complete";
+    }
+    if (TRANSFER_ETA) TRANSFER_ETA.textContent = `${safeTotal} images processed`;
+    
+    // Hide pause button when done
+    if (PAUSE_RESUME_BTN) PAUSE_RESUME_BTN.style.display = "none";
   }
 
+  // Handle Failures Display
   if (failures && failures.length) {
     const firstFive = failures.slice(0, 5);
     const more = failures.length > 5 ? ` (+${failures.length - 5} more)` : "";
-    TRANSFER_FAILURES.textContent =
-      "Failed: " + firstFive.map((f) => f.filename).join(", ") + more;
+    if (TRANSFER_FAILURES) TRANSFER_FAILURES.textContent = "Failed: " + firstFive.map((f) => f.filename).join(", ") + more;
   } else {
-    TRANSFER_FAILURES.textContent = "";
+    if (TRANSFER_FAILURES) TRANSFER_FAILURES.textContent = "";
   }
-
+  
+  // Update other buttons based on state
   applyTransferStateToButtons(state);
 }
 
 function renderLastRunSummary(state) {
   if (!LAST_RUN_CONTAINER) return;
-
-  // Always show the container
   LAST_RUN_CONTAINER.style.display = "block";
 
-  // No state or no previous run
+  // Hide everything if running
+  if (state && state.running) {
+    if (LAST_RUN_TEXT) LAST_RUN_TEXT.innerHTML = `<div>Transfer in progress…</div>`;
+    if (LAST_RUN_FAILURES_LIST) LAST_RUN_FAILURES_LIST.textContent = "";
+    if (RETRY_FAILED_BTN) RETRY_FAILED_BTN.disabled = true;
+    if (DOWNLOAD_LOG_BTN) DOWNLOAD_LOG_BTN.style.display = "none"; // Hide while running
+    return;
+  }
+  
   if (!state || state.total === 0) {
-    LAST_RUN_TEXT.innerHTML = `<div>No previous transfers recorded.</div>`;
-    LAST_RUN_FAILURES_LIST.textContent = "";
-    if (RETRY_FAILED_BTN) RETRY_FAILED_BTN.disabled = true;
-
-    // Apply collapsed/expanded state
-    if (LAST_RUN_BODY && LAST_RUN_CHEVRON) {
-      LAST_RUN_BODY.style.display = lastRunCollapsed ? "none" : "block";
-      LAST_RUN_CHEVRON.textContent = lastRunCollapsed ? "▾" : "▴";
-    }
-    return;
+      if (LAST_RUN_TEXT) LAST_RUN_TEXT.innerHTML = `<div>No previous transfers recorded.</div>`;
+      if (RETRY_FAILED_BTN) RETRY_FAILED_BTN.disabled = true;
+      if (DOWNLOAD_LOG_BTN) DOWNLOAD_LOG_BTN.style.display = "none";
+      return;
   }
 
-  if (state.running) {
-    LAST_RUN_TEXT.innerHTML = `<div>Transfer in progress…</div>`;
-    LAST_RUN_FAILURES_LIST.textContent = "";
-    if (RETRY_FAILED_BTN) RETRY_FAILED_BTN.disabled = true;
+  // --- SHOW THE DOWNLOAD BUTTON IF COMPLETED ---
+  if (DOWNLOAD_LOG_BTN) DOWNLOAD_LOG_BTN.style.display = "block"; 
 
-    if (LAST_RUN_BODY && LAST_RUN_CHEVRON) {
-      LAST_RUN_BODY.style.display = lastRunCollapsed ? "none" : "block";
-      LAST_RUN_CHEVRON.textContent = lastRunCollapsed ? "▾" : "▴";
-    }
-    return;
-  }
-
-  // ---- NORMAL LAST-RUN RENDER ----
-  const {
-    albumName,
-    projectId,
-    total,
-    successes,
-    failures,
-    startedAt,
-    updatedAt
-  } = state;
-
+  const { albumName, projectId, total, successes, failures, startedAt, updatedAt } = state;
   const okCount = successes?.length || 0;
   const failCount = failures?.length || 0;
+  // ... rest of the function remains the same ...
 
-  LAST_RUN_TEXT.innerHTML = `
-    <div><strong>Album:</strong> ${escapeHtml(albumName || "")}</div>
-    <div><strong>Project ID:</strong> <code>${escapeHtml(projectId ?? "—")}</code></div>
-    <div><strong>Total images:</strong> ${total}</div>
-    <div><strong>Success:</strong> ${okCount} &nbsp; <strong>Failed:</strong> ${failCount}</div>
-    <div><strong>Started:</strong> ${escapeHtml(new Date(startedAt).toLocaleString())}</div>
-    <div><strong>Finished:</strong> ${escapeHtml(new Date(updatedAt).toLocaleString())}</div>
-  `;
+  if (LAST_RUN_TEXT) {
+    LAST_RUN_TEXT.innerHTML = `
+        <div><strong>Album:</strong> ${escapeHtml(albumName || "")}</div>
+        <div><strong>Project ID:</strong> <code>${escapeHtml(projectId ?? "—")}</code></div>
+        <div><strong>Total images:</strong> ${total}</div>
+        <div><strong>Success:</strong> ${okCount} &nbsp; <strong>Failed:</strong> ${failCount}</div>
+        <div><strong>Started:</strong> ${escapeHtml(new Date(startedAt).toLocaleString())}</div>
+        <div><strong>Finished:</strong> ${escapeHtml(new Date(updatedAt).toLocaleString())}</div>
+    `;
+  }
 
   if (failCount) {
     const firstFive = failures.slice(0, 5).map(f => escapeHtml(f.filename)).join(", ");
     const more = failCount > 5 ? ` (+${failCount - 5} more)` : "";
-    LAST_RUN_FAILURES_LIST.textContent = `Failed files: ${firstFive}${more}`;
+    if (LAST_RUN_FAILURES_LIST) LAST_RUN_FAILURES_LIST.textContent = `Failed files: ${firstFive}${more}`;
     if (RETRY_FAILED_BTN) RETRY_FAILED_BTN.disabled = false;
   } else {
-    LAST_RUN_FAILURES_LIST.textContent = "No failed images in last run.";
+    if (LAST_RUN_FAILURES_LIST) LAST_RUN_FAILURES_LIST.textContent = "No failed images in last run.";
     if (RETRY_FAILED_BTN) RETRY_FAILED_BTN.disabled = true;
-  }
-
-  // Apply collapsed/expanded state
-  if (LAST_RUN_BODY && LAST_RUN_CHEVRON) {
-    LAST_RUN_BODY.style.display = lastRunCollapsed ? "none" : "block";
-    LAST_RUN_CHEVRON.textContent = lastRunCollapsed ? "▾" : "▴";
   }
 }
 
-
-
-// poll transfer state while popup is open
 let transferPollHandle = null;
 async function startTransferPoller() {
   if (transferPollHandle) return;
   transferPollHandle = setInterval(async () => {
     const st = await fetchTransferState();
     if (st) renderTransferPanel(st);
-
     const lr = (await chrome.storage.local.get("pts_last_run"))["pts_last_run"];
     renderLastRunSummary(lr);
-}, 800);
+  }, 800);
 }
 
-// ---------- Galleries ----------
+// ---------- Galleries Logic ----------
 
 async function loadGalleries() {
   const { pts_galleries } = await chrome.storage.local.get("pts_galleries");
   const galleries = pts_galleries || [];
 
-  GALLERIES.innerHTML = "";
+  if (GALLERIES) GALLERIES.innerHTML = "";
+  if (SELECT_ALL_BOX) SELECT_ALL_BOX.checked = false;
+
   if (!galleries.length) {
-    STATUS.textContent = "No galleries captured yet.";
-    GALLERIES.innerHTML =
-      '<div class="empty">No galleries found<span>Use “Start Capture” to load your Pic-Time dashboard.</span></div>';
+    if (STATUS) STATUS.textContent = "No galleries captured yet.";
+    if (GALLERIES) GALLERIES.innerHTML = '<div class="empty">No galleries found<span>Use “Start Capture” to load your Pic-Time dashboard.</span></div>';
+    updateTransferButtonText();
     return;
   }
 
-  STATUS.textContent = `Found ${galleries.length} galler${
-    galleries.length > 1 ? "ies" : "y"
-  }`;
+  if (STATUS) STATUS.textContent = `Found ${galleries.length} galler${galleries.length > 1 ? "ies" : "y"}`;
 
   galleries.forEach((g) => {
     const card = document.createElement("div");
     card.className = "gallery";
+    card.dataset.projectId = g.projectId; 
 
     const head = document.createElement("div");
     head.className = "gallery-head";
+
+    const checkWrap = document.createElement("div");
+    checkWrap.className = "gallery-check-wrapper";
+    
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "gallery-checkbox";
+    checkbox.dataset.projectId = g.projectId;
+    
+    if((g.mediaCount || 0) === 0) checkbox.disabled = true;
+    
+    checkbox.addEventListener('change', () => updateTransferButtonText());
+    checkWrap.appendChild(checkbox);
 
     const name = document.createElement("div");
     name.className = "gallery-name";
@@ -302,9 +365,9 @@ async function loadGalleries() {
 
     const chip = document.createElement("div");
     chip.className = "meta-chip";
-    chip.textContent = `${g.mediaCount || 0} items`;
+    chip.textContent = `${g.mediaCount || 0}`;
 
-    head.append(name, chip);
+    head.append(checkWrap, name, chip);
 
     const controls = document.createElement("div");
     controls.className = "btn-row";
@@ -312,36 +375,16 @@ async function loadGalleries() {
     const detailsBtn = document.createElement("button");
     detailsBtn.className = "btn-secondary";
     detailsBtn.textContent = "Details";
-    detailsBtn.setAttribute("aria-expanded", "false");
-
     controls.append(detailsBtn);
 
     const details = document.createElement("div");
     details.className = "details";
 
-    const kvName = document.createElement("div");
-    kvName.className = "kv";
-    kvName.innerHTML = `<strong>Name:</strong> ${escapeHtml(g.name)}`;
+    const kvName = document.createElement("div"); kvName.className = "kv"; kvName.innerHTML = `<strong>Name:</strong> ${escapeHtml(g.name)}`;
+    const kvId = document.createElement("div"); kvId.className = "kv"; kvId.innerHTML = `<strong>ID:</strong> <code>${escapeHtml(g.projectId ?? "—")}</code>`;
+    const kvCount = document.createElement("div"); kvCount.className = "kv"; kvCount.innerHTML = `<strong>Media:</strong> ${escapeHtml(g.mediaCount ?? 0)}`;
+    details.append(kvName, kvId, kvCount);
 
-    const kvId = document.createElement("div");
-    kvId.className = "kv";
-    kvId.innerHTML = `<strong>Project ID:</strong> <code>${escapeHtml(
-      g.projectId ?? "—"
-    )}</code>`;
-
-    const kvToken = document.createElement("div");
-    kvToken.className = "kv";
-    kvToken.innerHTML = `<strong>Token:</strong> <code>${escapeHtml(
-      g.token ?? "—"
-    )}</code>`;
-
-    const kvCount = document.createElement("div");
-    kvCount.className = "kv";
-    kvCount.innerHTML = `<strong>Media:</strong> ${escapeHtml(g.mediaCount ?? 0)}`;
-
-    details.append(kvName, kvId, kvToken, kvCount);
-
-    // --- DOWNLOAD + TRANSFER ---
     if ((g.mediaCount || 0) > 0) {
       const dlWrap = document.createElement("div");
       dlWrap.className = "download";
@@ -352,7 +395,6 @@ async function loadGalleries() {
       input.min = "1";
       input.max = String(maxN);
       input.placeholder = `1 – ${maxN}`;
-      input.inputMode = "numeric";
 
       const btnDownload = document.createElement("button");
       btnDownload.textContent = "Download";
@@ -364,7 +406,6 @@ async function loadGalleries() {
 
       input.addEventListener("input", () => {
         const n = clamp(Number(input.value || 0), 1, maxN);
-        if (String(n) !== input.value) input.value = String(n || "");
         const enabled = n >= 1 && n <= maxN;
         btnDownload.disabled = !enabled;
         btnTransfer.disabled = !enabled;
@@ -373,18 +414,15 @@ async function loadGalleries() {
       btnDownload.addEventListener("click", async () => {
         const sub = (SUBDOMAIN.value || "").trim();
         if (!sub) return;
-
         const n = clamp(Number(input.value || 0), 1, maxN);
         btnDownload.textContent = "Downloading...";
         btnDownload.disabled = true;
-
         await chrome.runtime.sendMessage({
           type: "DOWNLOAD_IMAGES",
           gallery: g,
           count: n,
           domain: sub
         });
-
         btnDownload.textContent = "Done ✔️";
         setTimeout(() => {
           btnDownload.textContent = "Download";
@@ -395,183 +433,167 @@ async function loadGalleries() {
       btnTransfer.addEventListener("click", async () => {
         const sub = (SUBDOMAIN.value || "").trim();
         if (!sub) return;
-
         const n = clamp(Number(input.value || 0), 1, maxN);
-
-        // extra guard: do not start if running
         const st = await fetchTransferState();
         if (st?.running) {
-          alert("A transfer is already running. Wait for it to finish.");
+          alert("A transfer is already running.");
           return;
         }
-
         btnTransfer.textContent = "Starting...";
         btnTransfer.disabled = true;
-
         const delayMs = getDelayMs();
-
-        const resp = await chrome.runtime.sendMessage({
+        await chrome.runtime.sendMessage({
           type: "TRANSFER_TO_GCP",
           gallery: g,
           count: n,
           domain: sub,
           delayMs
         });
-
-        if (!resp?.ok) {
-          btnTransfer.textContent = "Error";
-          setTimeout(() => {
-            btnTransfer.textContent = "Transfer";
-            btnTransfer.disabled = false;
-          }, 2000);
-          return;
-        }
-
-        btnTransfer.textContent = "Transferring...";
-        // background will keep updating state, poller will update UI
       });
 
       dlWrap.append(input, btnDownload, btnTransfer);
-
-      const note = document.createElement("div");
-      note.className = "note";
-      note.textContent = `Limit: up to ${maxN} images`;
-
-      details.append(dlWrap, note);
-    } else {
-      const note = document.createElement("div");
-      note.className = "note";
-      note.textContent = "This gallery has no media items.";
-      details.append(note);
+      details.append(dlWrap);
     }
 
     detailsBtn.addEventListener("click", () => {
       const open = details.classList.toggle("open");
-      detailsBtn.setAttribute("aria-expanded", String(open));
       detailsBtn.textContent = open ? "Hide details" : "Details";
     });
 
     card.append(head, controls, details);
-    GALLERIES.appendChild(card);
+    if (GALLERIES) GALLERIES.appendChild(card);
   });
 
-  // after building cards, apply current transfer state (disable transfer buttons if running)
+  updateTransferButtonText();
+  
   const st = await fetchTransferState();
   if (st) renderTransferPanel(st);
 }
 
-// ---------- Bulk transfer helpers ----------
+// ---------- Multi-Select Logic ----------
 
-async function waitForTransferToFinish() {
-  while (true) {
-    const st = await fetchTransferState();
-    if (!st || !st.running) return st;
-    await new Promise((r) => setTimeout(r, 1000));
-  }
+function getSelectedProjectIds() {
+  const checkboxes = document.querySelectorAll('.gallery-checkbox:checked');
+  return Array.from(checkboxes).map(cb => cb.dataset.projectId);
 }
 
-async function handleTransferAll() {
-  if (transferAllRunning) return;
-
-  const sub = (SUBDOMAIN.value || "").trim();
-  if (!sub) {
-    SUBDOMAIN.focus();
-    return;
+function updateTransferButtonText() {
+  if (!TRANSFER_SELECTED_BTN) return;
+  const checkboxes = document.querySelectorAll('.gallery-checkbox:checked');
+  const count = checkboxes.length;
+  const allCheckboxes = document.querySelectorAll('.gallery-checkbox:not(:disabled)');
+  if (SELECT_ALL_BOX && allCheckboxes.length > 0) {
+    SELECT_ALL_BOX.checked = (count === allCheckboxes.length);
+    SELECT_ALL_BOX.indeterminate = (count > 0 && count < allCheckboxes.length);
   }
+  TRANSFER_SELECTED_BTN.textContent = count > 0 ? `Transfer ${count} Selected` : "Select galleries...";
+  TRANSFER_SELECTED_BTN.disabled = (count === 0);
+}
 
+if (SELECT_ALL_BOX) {
+  SELECT_ALL_BOX.addEventListener('change', (e) => {
+      const checked = e.target.checked;
+      const checkboxes = document.querySelectorAll('.gallery-checkbox');
+      checkboxes.forEach(cb => {
+          if (!cb.disabled) cb.checked = checked;
+      });
+      updateTransferButtonText();
+  });
+}
+
+async function handleTransferSelected() {
+  if (transferAllRunning) return;
+  const sub = (SUBDOMAIN.value || "").trim();
+  if (!sub) { SUBDOMAIN.focus(); return; }
+  const selectedIds = getSelectedProjectIds();
+  if (selectedIds.length === 0) { alert("Please select at least one gallery."); return; }
   const delayMs = getDelayMs();
 
   transferAllRunning = true;
-  if (TRANSFER_ALL_BTN) {
-    TRANSFER_ALL_BTN.disabled = true;
-    TRANSFER_ALL_BTN.textContent = "Transferring all…";
-  }
+  TRANSFER_SELECTED_BTN.disabled = true;
+  TRANSFER_SELECTED_BTN.textContent = "Starting Batch...";
 
   try {
     const resp = await chrome.runtime.sendMessage({
       type: "TRANSFER_ALL_GALLERIES",
       domain: sub,
-      delayMs
+      delayMs,
+      projectIds: selectedIds
     });
-
-    if (!resp?.ok) {
-      alert(resp.error || "Could not start bulk transfer.");
-    }
+    if (!resp?.ok) alert(resp.error || "Could not start batch transfer.");
   } finally {
     transferAllRunning = false;
-    if (TRANSFER_ALL_BTN) {
-      TRANSFER_ALL_BTN.disabled = false;
-      TRANSFER_ALL_BTN.textContent = "Transfer all galleries";
-    }
   }
 }
 
-// ---------- Basic controls ----------
+// ---------- Event Listeners ----------
 
-START.addEventListener("click", async () => {
-  const sub = (SUBDOMAIN.value || "").trim();
-  if (!sub) {
-    SUBDOMAIN.focus();
-    SUBDOMAIN.classList.add("shake");
-    setTimeout(() => SUBDOMAIN.classList.remove("shake"), 400);
-    return;
-  }
+if (START) {
+    START.addEventListener("click", async () => {
+    const sub = (SUBDOMAIN.value || "").trim();
+    if (!sub) {
+        SUBDOMAIN.focus();
+        SUBDOMAIN.classList.add("shake");
+        setTimeout(() => SUBDOMAIN.classList.remove("shake"), 400);
+        return;
+    }
+    await chrome.storage.local.set({ [SUBDOMAIN_KEY]: sub });
+    const DASH_URL = `https://${sub}.pic-time.com/professional#dash`;
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (activeTab?.id) {
+        await chrome.tabs.update(activeTab.id, { url: DASH_URL });
+    } else {
+        await chrome.tabs.create({ url: DASH_URL });
+    }
+    STATUS.textContent = `Opening ${sub}.pic-time.com...`;
+    });
+}
 
-  await chrome.storage.local.set({ [SUBDOMAIN_KEY]: sub });
+if (REFRESH) REFRESH.addEventListener("click", loadGalleries);
 
-  const DASH_URL = `https://${sub}.pic-time.com/professional#dash`;
-  const [activeTab] = await chrome.tabs.query({
-    active: true,
-    currentWindow: true
-  });
-  if (activeTab?.id) {
-    await chrome.tabs.update(activeTab.id, { url: DASH_URL });
-  } else {
-    await chrome.tabs.create({ url: DASH_URL });
-  }
+if (CLEAR) {
+    CLEAR.addEventListener("click", async () => {
+    await chrome.runtime.sendMessage({ type: "CLEAR_HISTORY" });
+    await loadGalleries();
+    });
+}
 
-  STATUS.textContent = `Opening ${sub}.pic-time.com...`;
-});
+if (CLEAR_TRANSFER_BTN) {
+    CLEAR_TRANSFER_BTN.addEventListener("click", async () => {
+    await chrome.runtime.sendMessage({ type: "CLEAR_ACTIVE_TRANSFER_ONLY" });
+    const st = await fetchTransferState();
+    renderTransferPanel(st);
+    });
+}
 
-REFRESH.addEventListener("click", loadGalleries);
+if (advToggle) {
+    advToggle.addEventListener("click", () => {
+    const open = advPanel.style.display === "block";
+    advPanel.style.display = open ? "none" : "block";
+    advToggle.textContent = open ? "Advanced options ▾" : "Advanced options ▴";
+    });
+}
 
-CLEAR.addEventListener("click", async () => {
-  await chrome.runtime.sendMessage({ type: "CLEAR_HISTORY" });
-  await loadGalleries();
-});
+const dbgBtn = document.getElementById("debugClearStorage");
+if (dbgBtn) {
+    dbgBtn.addEventListener("click", async () => {
+    if (!confirm("Clear ALL extension data?")) return;
+    await chrome.storage.local.clear();
+    alert("Cache cleared!");
+    location.reload();
+    });
+}
 
-CLEAR_TRANSFER_BTN.addEventListener("click", async () => {
-  await chrome.runtime.sendMessage({ type: "CLEAR_ACTIVE_TRANSFER_ONLY" });
-  const st = await fetchTransferState();
-  renderTransferPanel(st);
-});
+if (SAVE_AUTH) {
+    SAVE_AUTH.addEventListener("click", async () => {
+    const val = (AUTH_INPUT.value || "").trim();
+    await chrome.storage.local.set({ [AUTH_KEY]: val });
+    alert("Backend auth key saved.");
+    });
+}
 
-
-advToggle.addEventListener("click", () => {
-  const open = advPanel.style.display === "block";
-  advPanel.style.display = open ? "none" : "block";
-  advToggle.textContent = open ? "Advanced options ▾" : "Advanced options ▴";
-});
-
-document.getElementById("debugClearStorage").addEventListener("click", async () => {
-  if (!confirm("Clear ALL extension data? This will reset galleries, vPaths, history, and transfer state.")) {
-    return;
-  }
-
-  await chrome.storage.local.clear();
-
-  alert("Cache cleared! Please refresh or reopen the extension.");
-  location.reload();
-});
-
-SAVE_AUTH.addEventListener("click", async () => {
-  const val = (AUTH_INPUT.value || "").trim();
-  await chrome.storage.local.set({ [AUTH_KEY]: val });
-  alert("Backend auth key saved. Future transfers will include this key.");
-});
-
-if (TRANSFER_ALL_BTN) {
-  TRANSFER_ALL_BTN.addEventListener("click", handleTransferAll);
+if (TRANSFER_SELECTED_BTN) {
+  TRANSFER_SELECTED_BTN.addEventListener("click", handleTransferSelected);
 }
 
 if (DELAY_INPUT) {
@@ -582,96 +604,112 @@ if (DELAY_INPUT) {
   });
 }
 
-
-// Last run toggle (collapse/expand)
 if (LAST_RUN_TOGGLE) {
   LAST_RUN_TOGGLE.addEventListener("click", () => {
     lastRunCollapsed = !lastRunCollapsed;
-
     LAST_RUN_BODY.style.display = lastRunCollapsed ? "none" : "block";
     LAST_RUN_CHEVRON.textContent = lastRunCollapsed ? "▾" : "▴";
   });
 }
 
-// Retry failed images
 if (RETRY_FAILED_BTN) {
   RETRY_FAILED_BTN.addEventListener("click", async () => {
     const lastRun = (await chrome.storage.local.get("pts_last_run"))["pts_last_run"];
-    if (!lastRun) {
-      alert("No previous run to retry.");
-      return;
-    }
-
-    const failures = lastRun.failures || [];
-    if (!failures.length) {
+    if (!lastRun || !lastRun.failures || !lastRun.failures.length) {
       alert("No failed images to retry.");
       return;
     }
-
     const sub = (SUBDOMAIN.value || "").trim();
-    if (!sub) {
-      alert("Enter your Pic-Time subdomain first.");
-      SUBDOMAIN.focus();
-      return;
-    }
-
-    const delayMs = getDelayMs();
+    if (!sub) { alert("Enter subdomain."); return; }
 
     const resp = await chrome.runtime.sendMessage({
       type: "RETRY_FAILED_UPLOADS",
       projectId: lastRun.projectId,
       albumName: lastRun.albumName,
-      failedFilenames: failures.map(f => f.filename).filter(Boolean),
+      failedFilenames: lastRun.failures.map(f => f.filename).filter(Boolean),
       domain: sub,
-      delayMs
+      delayMs: getDelayMs()
     });
-
-    if (!resp?.ok) {
-      alert(`Could not start retry: ${resp.error || "unknown error"}`);
-    }
+    if (!resp?.ok) alert(`Retry failed: ${resp.error}`);
   });
 }
 
-
-// Clear last run (reuse CLEAR_TRANSFER_LOG)
 if (CLEAR_LAST_RUN_BTN) {
   CLEAR_LAST_RUN_BTN.addEventListener("click", async () => {
     await chrome.runtime.sendMessage({ type: "CLEAR_LAST_RUN_ONLY" });
-    renderLastRunSummary({ total: 0 }); // reset UI
+    renderLastRunSummary({ total: 0 });
   });
-  
 }
-// ---------- init ----------
+
+
+if (DOWNLOAD_LOG_BTN) {
+  DOWNLOAD_LOG_BTN.addEventListener("click", async () => {
+    const data = await chrome.storage.local.get("pts_last_run");
+    const lastRun = data["pts_last_run"];
+
+    if (!lastRun) {
+      alert("No log data available.");
+      return;
+    }
+
+    // Construct the clean JSON
+    const report = {
+      meta: {
+        exportedAt: new Date().toISOString(),
+        domain: lastRun.domain || "unknown",
+        totalAlbumsProcessed: lastRun.sessionLogs ? lastRun.sessionLogs.length : 1
+      },
+      summary: {
+        totalImages: lastRun.total,
+        totalFailed: lastRun.totalFailed || lastRun.failures?.length || 0,
+        startedAt: new Date(lastRun.startedAt).toLocaleString(),
+        finishedAt: new Date(lastRun.updatedAt).toLocaleString()
+      },
+      // The aggregated failure list mapped to albums
+      allFailures: lastRun.allFailures || lastRun.failures || [],
+      // The detailed per-album metrics
+      albumDetails: lastRun.sessionLogs || []
+    };
+
+    // Create and trigger download
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `pictime-log-${Date.now()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 100);
+  });
+}
+
+
+// ---------- Init ----------
 
 (async () => {
   const saved = (await chrome.storage.local.get(SUBDOMAIN_KEY))[SUBDOMAIN_KEY];
-  if (saved) SUBDOMAIN.value = saved;
+  if (saved && SUBDOMAIN) SUBDOMAIN.value = saved;
 
-  // load saved auth token (don’t auto-show; just indicate it exists)
   const stored = await chrome.storage.local.get(AUTH_KEY);
-  if (stored[AUTH_KEY]) {
-    AUTH_INPUT.placeholder = "•••••••• (saved)";
-  }
+  if (stored[AUTH_KEY] && AUTH_INPUT) AUTH_INPUT.placeholder = "•••••••• (saved)";
 
-  // restore delay
   if (DELAY_INPUT) {
     const dStored = (await chrome.storage.local.get(DELAY_KEY))[DELAY_KEY];
-    if (typeof dStored === "number") {
-      DELAY_INPUT.value = String(dStored);
-    } else {
-      DELAY_INPUT.value = "0";
-    }
+    DELAY_INPUT.value = (typeof dStored === "number") ? String(dStored) : "0";
   }
 
-  
   await loadGalleries();
 
   const st = await fetchTransferState();
   renderTransferPanel(st);
-
-// load last run snapshot
-const lastRunStored = (await chrome.storage.local.get("pts_last_run"))["pts_last_run"];
-renderLastRunSummary(lastRunStored);
+  
+  const lastRunStored = (await chrome.storage.local.get("pts_last_run"))["pts_last_run"];
+  renderLastRunSummary(lastRunStored);
 
   startTransferPoller();
 })();

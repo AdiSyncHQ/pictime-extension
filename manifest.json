@@ -6,7 +6,8 @@
     "permissions": ["downloads.open", "storage","downloads","tabs","scripting","activeTab"],
     "host_permissions": [
        "*://*.pic-time.com/*",
-       "*://*.a02.azurefd.net/*"
+       "*://*.a02.azurefd.net/*",
+       "*://*.google.com/*"
     ],
     "action": {
       "default_title": "Pic-Time Sniffer",
