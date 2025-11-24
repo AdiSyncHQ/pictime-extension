@@ -151,38 +151,66 @@ async function checkInternetConnection() {
  * 1. User unpauses manually.
  * 2. AND Internet connection is restored.
  */
+// background.js - Replace the existing waitUntilResumedAndOnline function with this:
+
+/**
+ * THE SMART BARRIER:
+ * 1. Checks connectivity.
+ * 2. If User Paused -> Waits for user.
+ * 3. If Offline -> Auto-pauses and loops until Online.
+ * 4. If Online & was Network Paused -> Auto-resumes.
+ */
 async function waitUntilResumedAndOnline() {
-    let isBlocked = true;
-    
-    while (isBlocked) {
-        // 1. Check State
-        const state = (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER];
-        if (!state || !state.running) return; // if cancelled entirely
+  let isBlocked = true;
+  
+  while (isBlocked) {
+      // 1. Get fresh state
+      const state = (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER];
+      
+      // If transfer was cancelled completely (stopped), exit immediately
+      if (!state || !state.running) return; 
 
-        // 2. Check Network
-        const isOnline = await checkInternetConnection();
+      // 2. Check Network Status
+      const isOnline = await checkInternetConnection();
 
-        // Determine if we are paused by USER or NETWORK
-        if (state.paused) {
-            // Explicit user pause - keep waiting
-            await updateTransferState({ pausedReason: 'user' });
-            await new Promise(r => setTimeout(r, 1000)); 
-            continue; 
-        } else if (!isOnline) {
-            // Network pause - auto-detect interruption
-            console.warn("[bg] Network disruption detected. Pausing...");
-            await updateTransferState({ paused: true, pausedReason: 'network' });
-            await new Promise(r => setTimeout(r, 2000)); // Wait 2s before checking again
-            continue;
-        } else {
-            // All clear
-            if (state.pausedReason) {
-                // We were paused, now we are running
-                await updateTransferState({ paused: false, pausedReason: null });
-            }
-            isBlocked = false;
-        }
-    }
+      if (state.paused) {
+          // --- SCENARIO A: CURRENTLY PAUSED ---
+
+          if (state.pausedReason === 'user') {
+              // Case: User clicked Pause. We MUST wait for user to click Resume.
+              // We don't care about internet here, just wait.
+              await new Promise(r => setTimeout(r, 1000));
+              continue; 
+          }
+
+          if (state.pausedReason === 'network') {
+              // Case: Paused because of internet. 
+              if (isOnline) {
+                  // ACTION: Internet is back! Auto-Resume!
+                  console.log("[bg] Internet restored. Auto-resuming...");
+                  await updateTransferState({ paused: false, pausedReason: null });
+                  isBlocked = false; // Break the loop, continue upload
+              } else {
+                  // Still offline. Keep waiting.
+                  await new Promise(r => setTimeout(r, 2000)); 
+                  continue;
+              }
+          }
+      } else {
+          // --- SCENARIO B: CURRENTLY RUNNING ---
+          
+          if (!isOnline) {
+              // ACTION: Internet dropped! Auto-Pause!
+              console.warn("[bg] Network disruption detected. Pausing...");
+              await updateTransferState({ paused: true, pausedReason: 'network' });
+              await new Promise(r => setTimeout(r, 2000));
+              continue;
+          }
+
+          // Internet is fine, user hasn't paused. Proceed.
+          isBlocked = false;
+      }
+  }
 }
 
 // -----------------------------------------------------------------------------

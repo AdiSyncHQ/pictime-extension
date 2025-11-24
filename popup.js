@@ -3,9 +3,14 @@ console.log("[popup] Ready");
 let lastStableEta = ""; // persists between renders
 let lastRunCollapsed = true;
 
+// --- Element References ---
 const AUTH_INPUT = document.getElementById("authTokenInput");
 const SAVE_AUTH = document.getElementById("saveAuthBtn");
 const AUTH_KEY = "pts_auth_token";
+
+// --- MISSING DEFINITIONS ADDED HERE ---
+const CONCURRENCY_INPUT = document.getElementById("concurrencyInput");
+const CONCURRENCY_KEY = "pts_concurrency";
 
 const TRANSFER_ETA = document.getElementById("transferEta");
 
@@ -22,7 +27,6 @@ const TRANSFER_BAR = document.getElementById("transferBar");
 const TRANSFER_FAILURES = document.getElementById("transferFailures");
 const CLEAR_TRANSFER_BTN = document.getElementById("clearTransferBtn");
 
-// NEW PAUSE BTN (May be null if HTML is not updated)
 const PAUSE_RESUME_BTN = document.getElementById("pauseResumeBtn");
 
 const SUBDOMAIN_KEY = "pts_subdomain";
@@ -44,7 +48,6 @@ const CLEAR_LAST_RUN_BTN = document.getElementById("clearLastRunBtn");
 const TRANSFER_SELECTED_BTN = document.getElementById("transferSelectedBtn");
 const SELECT_ALL_BOX = document.getElementById("selectAllBox");
 const DOWNLOAD_LOG_BTN = document.getElementById("downloadLogBtn");
-
 
 let transferAllRunning = false;
 
@@ -113,7 +116,6 @@ async function fetchTransferState() {
 function applyTransferStateToButtons(state) {
   const running = !!state?.running;
   
-  // SAFETY CHECK: Only try to style the button if it exists in HTML
   if (PAUSE_RESUME_BTN) {
       PAUSE_RESUME_BTN.style.display = running ? "block" : "none";
   }
@@ -133,19 +135,17 @@ function applyTransferStateToButtons(state) {
 }
 
 function renderTransferPanel(state) {
-  // 1. Hide panel if nothing is happening and no history in state
   if (!state || (!state.running && state.total === 0 && state.completed === 0)) {
     if (TRANSFER_PANEL) TRANSFER_PANEL.style.display = "none";
     return;
   }
-  if (TRANSFER_PANEL) TRANSFER_PANEL.style.display = "flex"; // Changed to flex for new layout
+  if (TRANSFER_PANEL) TRANSFER_PANEL.style.display = "flex"; 
   
   const { running, paused, pausedReason, albumName, total, completed, successes, failures } = state;
   const safeTotal = total || 0;
   const safeCompleted = completed || 0;
   const pct = safeTotal > 0 ? Math.round((safeCompleted / safeTotal) * 100) : 0;
 
-  // Reset ETA calculation if we just started
   if (running && safeCompleted === 0) {
     lastSpeedSample = null;
     lastCompleted = null;
@@ -153,49 +153,41 @@ function renderTransferPanel(state) {
     lastStableEta = "";
   }
 
-  // Update Bar Width
   if (TRANSFER_BAR) TRANSFER_BAR.style.width = `${pct}%`;
-
-  // --- LOGIC: Handle 3 States (Running, Network Pause, User Pause) ---
 
   if (running) {
     if (paused) {
-        // --- CASE A: PAUSED ---
-        
-        // Stop animation
         if (TRANSFER_BAR) {
             TRANSFER_BAR.style.animation = "none";
         }
 
         if (pausedReason === 'network') {
-            // 1. NETWORK PAUSE (Higher Priority)
-            if (TRANSFER_BAR) TRANSFER_BAR.style.backgroundColor = "#ef4444"; // Red Bar
+            if (TRANSFER_BAR) TRANSFER_BAR.style.backgroundColor = "#ef4444"; 
 
             if (TRANSFER_PROGRESS) {
-                TRANSFER_PROGRESS.className = "status-network"; // Red text class
+                TRANSFER_PROGRESS.className = "status-network"; 
                 TRANSFER_PROGRESS.textContent = "Waiting for Internet...";
             }
             if (TRANSFER_ETA) TRANSFER_ETA.textContent = "Auto-resuming when online";
 
             if (PAUSE_RESUME_BTN) {
                 PAUSE_RESUME_BTN.textContent = "Connecting...";
-                PAUSE_RESUME_BTN.className = "btn-control waiting-style"; // Pulse Red Style
+                PAUSE_RESUME_BTN.className = "btn-control waiting-style"; 
                 PAUSE_RESUME_BTN.disabled = true;
             }
 
         } else {
-            // 2. USER PAUSE
-            if (TRANSFER_BAR) TRANSFER_BAR.style.backgroundColor = "#f59e0b"; // Amber Bar
+            if (TRANSFER_BAR) TRANSFER_BAR.style.backgroundColor = "#f59e0b"; 
 
             if (TRANSFER_PROGRESS) {
-                TRANSFER_PROGRESS.className = "status-paused"; // Amber text
+                TRANSFER_PROGRESS.className = "status-paused"; 
                 TRANSFER_PROGRESS.textContent = "Transfer Paused";
             }
             if (TRANSFER_ETA) TRANSFER_ETA.textContent = "Resumed by user action";
 
             if (PAUSE_RESUME_BTN) {
                 PAUSE_RESUME_BTN.textContent = "Resume";
-                PAUSE_RESUME_BTN.className = "btn-control resume-style"; // Green/Purple Style
+                PAUSE_RESUME_BTN.className = "btn-control resume-style"; 
                 PAUSE_RESUME_BTN.disabled = false;
                 PAUSE_RESUME_BTN.onclick = async () => {
                     PAUSE_RESUME_BTN.textContent = "Starting...";
@@ -204,19 +196,16 @@ function renderTransferPanel(state) {
             }
         }
     } else {
-        // --- CASE B: RUNNING NORMALLY ---
-        
         if (TRANSFER_BAR) {
-            TRANSFER_BAR.style.backgroundColor = ""; // Default Green gradient
-            TRANSFER_BAR.style.animation = ""; // Restore animation
+            TRANSFER_BAR.style.backgroundColor = ""; 
+            TRANSFER_BAR.style.animation = ""; 
         }
 
         if (TRANSFER_PROGRESS) {
-            TRANSFER_PROGRESS.className = ""; // Reset class
+            TRANSFER_PROGRESS.className = ""; 
             TRANSFER_PROGRESS.textContent = `Transferring "${albumName || "Unknown"}"`;
         }
 
-        // ETA Calculation
         const etaSeconds = estimateEta(safeTotal, safeCompleted);
         if (etaSeconds && etaSeconds > 0) lastStableEta = formatEta(etaSeconds);
         
@@ -226,7 +215,7 @@ function renderTransferPanel(state) {
 
         if (PAUSE_RESUME_BTN) {
             PAUSE_RESUME_BTN.textContent = "Pause";
-            PAUSE_RESUME_BTN.className = "btn-control pause-style"; // Neutral Style
+            PAUSE_RESUME_BTN.className = "btn-control pause-style"; 
             PAUSE_RESUME_BTN.disabled = false;
             PAUSE_RESUME_BTN.onclick = async () => {
                 PAUSE_RESUME_BTN.textContent = "Pausing...";
@@ -235,18 +224,15 @@ function renderTransferPanel(state) {
         }
     }
   } else {
-    // --- CASE C: COMPLETED ---
     if (TRANSFER_PROGRESS) {
         TRANSFER_PROGRESS.className = "";
         TRANSFER_PROGRESS.textContent = "Transfer Complete";
     }
     if (TRANSFER_ETA) TRANSFER_ETA.textContent = `${safeTotal} images processed`;
     
-    // Hide pause button when done
     if (PAUSE_RESUME_BTN) PAUSE_RESUME_BTN.style.display = "none";
   }
 
-  // Handle Failures Display
   if (failures && failures.length) {
     const firstFive = failures.slice(0, 5);
     const more = failures.length > 5 ? ` (+${failures.length - 5} more)` : "";
@@ -255,7 +241,6 @@ function renderTransferPanel(state) {
     if (TRANSFER_FAILURES) TRANSFER_FAILURES.textContent = "";
   }
   
-  // Update other buttons based on state
   applyTransferStateToButtons(state);
 }
 
@@ -263,12 +248,11 @@ function renderLastRunSummary(state) {
   if (!LAST_RUN_CONTAINER) return;
   LAST_RUN_CONTAINER.style.display = "block";
 
-  // Hide everything if running
   if (state && state.running) {
     if (LAST_RUN_TEXT) LAST_RUN_TEXT.innerHTML = `<div>Transfer in progress…</div>`;
     if (LAST_RUN_FAILURES_LIST) LAST_RUN_FAILURES_LIST.textContent = "";
     if (RETRY_FAILED_BTN) RETRY_FAILED_BTN.disabled = true;
-    if (DOWNLOAD_LOG_BTN) DOWNLOAD_LOG_BTN.style.display = "none"; // Hide while running
+    if (DOWNLOAD_LOG_BTN) DOWNLOAD_LOG_BTN.style.display = "none"; 
     return;
   }
   
@@ -279,13 +263,11 @@ function renderLastRunSummary(state) {
       return;
   }
 
-  // --- SHOW THE DOWNLOAD BUTTON IF COMPLETED ---
   if (DOWNLOAD_LOG_BTN) DOWNLOAD_LOG_BTN.style.display = "block"; 
 
   const { albumName, projectId, total, successes, failures, startedAt, updatedAt } = state;
   const okCount = successes?.length || 0;
   const failCount = failures?.length || 0;
-  // ... rest of the function remains the same ...
 
   if (LAST_RUN_TEXT) {
     LAST_RUN_TEXT.innerHTML = `
@@ -585,10 +567,38 @@ if (dbgBtn) {
 }
 
 if (SAVE_AUTH) {
-    SAVE_AUTH.addEventListener("click", async () => {
-    const val = (AUTH_INPUT.value || "").trim();
-    await chrome.storage.local.set({ [AUTH_KEY]: val });
-    alert("Backend auth key saved.");
+  SAVE_AUTH.addEventListener("click", async () => {
+      // 1. Prepare Auth Token
+      const authVal = (AUTH_INPUT.value || "").trim();
+
+      // 2. Prepare Concurrency
+      let concVal = 6; // default
+      if (CONCURRENCY_INPUT) {
+          concVal = Math.floor(Number(CONCURRENCY_INPUT.value));
+          // Validate limits
+          if (concVal < 1) concVal = 1;
+          if (concVal > 20) concVal = 20;
+          // Update the input visually in case we clamped it
+          CONCURRENCY_INPUT.value = String(concVal);
+      }
+
+      // 3. Save BOTH to storage
+      await chrome.storage.local.set({ 
+          [AUTH_KEY]: authVal,
+          [CONCURRENCY_KEY]: concVal
+      });
+
+      alert("Settings saved!");
+  });
+}
+
+// --- ADDED MISSING CONCURRENCY AUTO-SAVE ---
+if (CONCURRENCY_INPUT) {
+    CONCURRENCY_INPUT.addEventListener("change", async () => {
+        let val = Math.floor(Number(CONCURRENCY_INPUT.value));
+        if(val < 1) val = 1; if(val > 20) val = 20;
+        CONCURRENCY_INPUT.value = val;
+        await chrome.storage.local.set({ [CONCURRENCY_KEY]: val });
     });
 }
 
@@ -692,15 +702,20 @@ if (DOWNLOAD_LOG_BTN) {
 // ---------- Init ----------
 
 (async () => {
-  const saved = (await chrome.storage.local.get(SUBDOMAIN_KEY))[SUBDOMAIN_KEY];
-  if (saved && SUBDOMAIN) SUBDOMAIN.value = saved;
+  const data = await chrome.storage.local.get([SUBDOMAIN_KEY, AUTH_KEY, DELAY_KEY, CONCURRENCY_KEY]);
 
-  const stored = await chrome.storage.local.get(AUTH_KEY);
-  if (stored[AUTH_KEY] && AUTH_INPUT) AUTH_INPUT.placeholder = "•••••••• (saved)";
+  if (data[SUBDOMAIN_KEY] && SUBDOMAIN) SUBDOMAIN.value = data[SUBDOMAIN_KEY];
+  if (data[AUTH_KEY] && AUTH_INPUT) AUTH_INPUT.placeholder = "•••••••• (saved)";
 
   if (DELAY_INPUT) {
-    const dStored = (await chrome.storage.local.get(DELAY_KEY))[DELAY_KEY];
+    const dStored = data[DELAY_KEY];
     DELAY_INPUT.value = (typeof dStored === "number") ? String(dStored) : "0";
+  }
+
+  // --- ADDED MISSING CONCURRENCY INIT ---
+  if (CONCURRENCY_INPUT) {
+    const cStored = data[CONCURRENCY_KEY];
+    CONCURRENCY_INPUT.value = (typeof cStored === "number") ? String(cStored) : "6";
   }
 
   await loadGalleries();
