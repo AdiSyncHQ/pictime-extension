@@ -22,7 +22,7 @@ const HISTORY_MAX = 20;
 const KEY_LAST_RUN = "pts_last_run";
 const KEY_ALL_FAILURES = "pts_all_failures";
 
-const BACKEND_BASE = "https://pic-time-backend-448778667929.us-central1.run.app";
+const BACKEND_BASE = "https://migration-backend-223066796377.us-central1.run.app";
 
 // -----------------------------------------------------------------------------
 // Transfer state helpers
