@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "Pic-Time Downloader",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "description": "Opens a URL, captures the dashboard POST JSON, and shows projects in the popup with persistence.",
     "permissions": ["downloads.open", "storage","downloads","tabs","scripting","activeTab"],
     "host_permissions": [
