@@ -25,7 +25,7 @@ const KEY_ALL_FAILURES = "pts_all_failures";
 let HARD_PAUSE = false; // prevents uploads from running during CAPTCHA recovery
 
 
-const BACKEND_BASE = "https://pic-time-backend-448778667929.us-central1.run.app";
+const BACKEND_BASE = "https://migration-backend-223066796377.us-central1.run.app";
 
 // -----------------------------------------------------------------------------
 // Transfer state helpers
