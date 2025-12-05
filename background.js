@@ -13,6 +13,7 @@ const KEY_CONCURRENCY = "pts_concurrency";
 const JITTER_MIN = 150;
 const JITTER_MAX = 350;
 const MAX_RETRIES = 3;
+const MAX_CAPTCHA_RETRIES = 3; 
 
 const KEY_LAST = "pts_last";
 const KEY_GALLERIES = "pts_galleries";
@@ -21,8 +22,10 @@ const KEY_TRANSFER = "pts_transfer_state";
 const HISTORY_MAX = 20;
 const KEY_LAST_RUN = "pts_last_run";
 const KEY_ALL_FAILURES = "pts_all_failures";
+let HARD_PAUSE = false; // prevents uploads from running during CAPTCHA recovery
 
-const BACKEND_BASE = "https://migration-backend-223066796377.us-central1.run.app";
+
+const BACKEND_BASE = "https://pic-time-backend-448778667929.us-central1.run.app";
 
 // -----------------------------------------------------------------------------
 // Transfer state helpers
@@ -43,8 +46,8 @@ async function saveFinalRunSnapshot() {
 async function resetTransferState() {
   const empty = {
     running: false,
-    paused: false,        // <--- NEW
-    pausedReason: null,   // <--- NEW ('user' or 'network')
+    paused: false,
+    pausedReason: null, // 'user', 'network', or 'captcha'
     projectId: null,
     albumName: null,
     total: 0,
@@ -116,24 +119,147 @@ async function saveCapture(payload) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// ANTI-CAPTCHA PROTOCOL
+// -----------------------------------------------------------------------------
+
+async function verifyMetadataViaIsolated(projectId) {
+  const tabs = await chrome.tabs.query({ url: "*://*.pic-time.com/*" });
+  const tab = tabs[0];
+  if (!tab) return false;
+
+  return await new Promise(resolve => {
+    chrome.tabs.sendMessage(
+      tab.id,
+      { type: "VERIFY_PROJECT_METADATA", projectId },
+      resp => {
+        if (chrome.runtime.lastError || !resp?.ok) return resolve(false);
+        resolve(resp.cleared);
+      }
+    );
+  });
+}
+
+
+async function findPicTimeTab() {
+  const tabs = await chrome.tabs.query({ url: "*://*.pic-time.com/*" });
+  return tabs.find(t => t.active) || tabs[0];
+}
+
+async function resolveCaptchaSequence(options = {}) {
+  const isZeroPhotoTrigger = !!options.zeroPhoto;
+  console.warn("[BG] 🛡 CAPTCHA Recovery starting...", { isZeroPhotoTrigger });
+
+  let st = (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] || {};
+  const projectId = st.projectId;
+
+  await updateTransferState({
+    ...st,
+    paused: true,
+    pausedReason: "captcha",
+    running: true,
+    resumeCountdown: 0
+  });
+
+  const tabs = await chrome.tabs.query({ url: "*://*.pic-time.com/*" });
+  const tab = tabs[0];
+  if (!tab) return false;
+
+  for (let cycle = 1; cycle <= 3; cycle++) {
+    console.warn(`[BG] CAPTCHA cycle ${cycle}/3`);
+
+    // 1. Reload page ONCE
+    try {
+      await chrome.tabs.reload(tab.id);
+    } catch (e) {
+      console.warn("Failed reload:", e);
+    }
+
+    // 2. Hard wait 10s
+    await new Promise(r => setTimeout(r, 10000));
+
+    // 3. Run unBlockMe()
+    const unblockResp = await new Promise(resolve => {
+      chrome.tabs.sendMessage(tab.id, { type: "TRIGGER_CAPTCHA_FIX" }, resolve);
+    });
+
+    // 4. Hard wait another 10s for it to take effect
+    await new Promise(r => setTimeout(r, 10000));
+
+    // 5. Check metadata
+    const ok = await verifyMetadataViaIsolated(projectId);
+    if (ok) {
+      console.warn("[BG] 🟩 Captcha solved successfully.");
+      await updateTransferState({
+        ...(await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER],
+        paused: false,
+        pausedReason: null,
+        resumeCountdown: 0
+      });
+      return true;
+    }
+  }
+
+  // FAILED ALL 3 CYCLES
+  console.warn("[BG] ❌ CAPTCHA could not be solved.");
+
+  if (isZeroPhotoTrigger) {
+    // Skip album
+    await updateTransferState({
+      ...(await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER],
+      paused: false,
+      pausedReason: null,
+      running: false
+    });
+    return false;
+  }
+
+  // Hard block → user must intervene
+  await updateTransferState({
+    ...(await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER],
+    paused: true,
+    pausedReason: "user"
+  });
+
+  chrome.tabs.sendMessage(tab.id, { type: "SHOW_CAPTCHA_FAILED_ALERT" });
+  return false;
+}
+
+
+
+
+
+
+
 async function fetchImageFromPicTime(url) {
+  // If captcha recovery is currently active, do not hit Pic-Time at all.
+  if (HARD_PAUSE) {
+    throw new Error("HARD_PAUSE_ACTIVE");
+  }
+
   const res = await fetch(url, { method: "GET", credentials: "include" });
-  if (!res.ok) throw new Error(`Pic-Time fetch failed: ${res.status} ${res.statusText}`);
+
+  // If pause activated mid-request
+  if (HARD_PAUSE) {
+    throw new Error("HARD_PAUSE_ACTIVE");
+  }
+
+  // No captcha detection here anymore.
+  if (!res.ok) {
+    throw new Error(`Pic-Time fetch failed: ${res.status} ${res.statusText}`);
+  }
+
   return await res.blob();
 }
+
 
 // -----------------------------------------------------------------------------
 // NETWORK CHECKER & PAUSE BARRIER
 // -----------------------------------------------------------------------------
 
-/**
- * Lightweight check to see if internet is accessible.
- * Uses a no-cors HEAD request to Google (fast, reliable).
- */
 async function checkInternetConnection() {
     if (!navigator.onLine) return false;
     try {
-        // Random query param prevents caching
         await fetch(`https://www.google.com/favicon.ico?_=${Date.now()}`, { 
             method: 'HEAD', 
             mode: 'no-cors', 
@@ -145,69 +271,42 @@ async function checkInternetConnection() {
     }
 }
 
-/**
- * THE BARRIER:
- * Blocks execution inside the worker loop until:
- * 1. User unpauses manually.
- * 2. AND Internet connection is restored.
- */
-// background.js - Replace the existing waitUntilResumedAndOnline function with this:
-
-/**
- * THE SMART BARRIER:
- * 1. Checks connectivity.
- * 2. If User Paused -> Waits for user.
- * 3. If Offline -> Auto-pauses and loops until Online.
- * 4. If Online & was Network Paused -> Auto-resumes.
- */
 async function waitUntilResumedAndOnline() {
   let isBlocked = true;
   
   while (isBlocked) {
-      // 1. Get fresh state
       const state = (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER];
-      
-      // If transfer was cancelled completely (stopped), exit immediately
       if (!state || !state.running) return; 
 
-      // 2. Check Network Status
       const isOnline = await checkInternetConnection();
 
       if (state.paused) {
-          // --- SCENARIO A: CURRENTLY PAUSED ---
-
           if (state.pausedReason === 'user') {
-              // Case: User clicked Pause. We MUST wait for user to click Resume.
-              // We don't care about internet here, just wait.
               await new Promise(r => setTimeout(r, 1000));
               continue; 
           }
-
+          if (state.pausedReason === 'captcha') {
+              // Wait for resolver
+              await new Promise(r => setTimeout(r, 1000));
+              continue; 
+          }
           if (state.pausedReason === 'network') {
-              // Case: Paused because of internet. 
               if (isOnline) {
-                  // ACTION: Internet is back! Auto-Resume!
                   console.log("[bg] Internet restored. Auto-resuming...");
                   await updateTransferState({ paused: false, pausedReason: null });
-                  isBlocked = false; // Break the loop, continue upload
+                  isBlocked = false; 
               } else {
-                  // Still offline. Keep waiting.
                   await new Promise(r => setTimeout(r, 2000)); 
                   continue;
               }
           }
       } else {
-          // --- SCENARIO B: CURRENTLY RUNNING ---
-          
           if (!isOnline) {
-              // ACTION: Internet dropped! Auto-Pause!
               console.warn("[bg] Network disruption detected. Pausing...");
               await updateTransferState({ paused: true, pausedReason: 'network' });
               await new Promise(r => setTimeout(r, 2000));
               continue;
           }
-
-          // Internet is fine, user hasn't paused. Proceed.
           isBlocked = false;
       }
   }
@@ -225,14 +324,8 @@ async function processUploadsInParallel(photos, projectId, albumName, domain) {
 
   const delayMs = Number(state.delayMs) || 0;
   const effectiveDomain = domain || state.domain || null;
-
-  // --- NEW LOGIC START ---
-  // 1. Get the dynamic concurrency setting from storage
   const cVal = (await chrome.storage.local.get(KEY_CONCURRENCY))[KEY_CONCURRENCY];
-  
-  // 2. Use the stored value, or fall back to DEFAULT_CONCURRENCY (6)
   const activeConcurrency = Number(cVal) || DEFAULT_CONCURRENCY;
-  // --- NEW LOGIC END ---
 
   function jitter() {
     const delay = JITTER_MIN + Math.random() * (JITTER_MAX - JITTER_MIN);
@@ -244,9 +337,7 @@ async function processUploadsInParallel(photos, projectId, albumName, domain) {
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        // --- THE BARRIER ---
         await waitUntilResumedAndOnline();
-        // -------------------
 
         if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
         await jitter();
@@ -276,7 +367,7 @@ async function processUploadsInParallel(photos, projectId, albumName, domain) {
         const uploadUrl = metaJson.uploadUrl;
         if (!uploadUrl) throw new Error("Missing uploadUrl from backend");
 
-        // 2) Fetch Blob
+        // 2) Fetch Blob from Pic-Time (With Captcha Check)
         const blob = await fetchImageFromPicTime(photo.url);
 
         // 3) Upload to GCS
@@ -313,11 +404,43 @@ async function processUploadsInParallel(photos, projectId, albumName, domain) {
         console.warn(`Retry ${attempt}/${MAX_RETRIES} for ${filename}`, err);
         const errString = String(err);
 
-        if (errString.includes("Network") || errString.includes("fetch failed") || errString.includes("Failed to fetch")) {
-            console.log("Detected network failure. Forcing pause check...");
-            attempt--; 
-            await new Promise(r => setTimeout(r, 2000)); 
-            continue; 
+        // NEW: Respect global HARD_PAUSE caused by CAPTCHA recovery.
+        if (errString.includes("HARD_PAUSE_ACTIVE")) {
+          console.warn("[BG] Worker frozen due to HARD_PAUSE, waiting for resume...");
+          
+          // Wait indefinitely until HARD_PAUSE is lifted
+          await new Promise(resolve => {
+              const timer = setInterval(() => {
+                  if (!HARD_PAUSE) {
+                      clearInterval(timer);
+                      resolve();
+                  }
+              }, 500);
+          });
+      
+          // Once resumed, restart this attempt (do not increment retries)
+          attempt--;
+          continue;
+      }
+      
+
+        // CAPTCHA HANDLER
+        if (errString.includes("CAPTCHA_DETECTED")) {
+          attempt--;
+          await new Promise(r => setTimeout(r, 5000));
+          continue;
+        }
+
+        // Network-ish errors → let network checker handle pause/resume
+        if (
+          errString.includes("Network") ||
+          errString.includes("fetch failed") ||
+          errString.includes("Failed to fetch")
+        ) {
+          console.log("Detected network failure. Forcing pause check...");
+          attempt--;
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
         }
 
         if (attempt === MAX_RETRIES) {
@@ -325,11 +448,11 @@ async function processUploadsInParallel(photos, projectId, albumName, domain) {
         }
         await new Promise(resolve => setTimeout(resolve, 500 * attempt));
       }
+
     }
   }
 
   let index = 0;
-  // --- CHANGED: Use activeConcurrency here instead of CONCURRENCY ---
   const pool = Array(activeConcurrency).fill(0).map(async () => {
       while (index < photos.length) {
         await waitUntilResumedAndOnline();
@@ -366,7 +489,6 @@ async function processUploadsInParallel(photos, projectId, albumName, domain) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
-        // --- NEW PAUSE / RESUME HANDLERS ---
         if (msg?.type === "PAUSE_TRANSFER") {
             await updateTransferState({ paused: true, pausedReason: 'user' });
             sendResponse?.({ ok: true });
@@ -374,7 +496,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         if (msg?.type === "RESUME_TRANSFER") {
-            // Check network first
             const online = await checkInternetConnection();
             if(!online) {
                 sendResponse?.({ ok: false, error: "Cannot resume: No internet connection detected." });
@@ -384,7 +505,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse?.({ ok: true });
             return;
         }
-        // -----------------------------------
 
       if (msg?.type === "CLEAR_ACTIVE_TRANSFER_ONLY") {
         const empty = await resetTransferState(); 
@@ -397,6 +517,48 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse?.({ ok: true });
         return;
       }
+
+      if (msg?.type === "CAPTCHA_OCCURRED") {
+        console.warn("[BG] 🟥 CAPTCHA_OCCURRED received — PAUSING TRANSFERS IMMEDIATELY.");
+      
+        await updateTransferState({
+          ...(await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER],
+          paused: true,
+          pausedReason: "captcha",
+          running: true  // do NOT mark finished
+        });
+      
+        const ok = await resolveCaptchaSequence({ zeroPhoto: false });
+      
+        if (ok) {
+          console.warn("[BG] 🟩 CAPTCHA recovery complete — resuming transfer.");
+        } else {
+          console.warn("[BG] ❌ CAPTCHA recovery failed. Transfer remains paused for user intervention.");
+        }
+        return;
+      }
+      if (msg?.type === "CAPTCHA_ZERO_PHOTO") {
+        console.warn("[BG] ZERO-PHOTO CAPTCHA DETECTED");
+      
+        await updateTransferState({
+          ...(await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER],
+          paused: true,
+          pausedReason: "captcha",
+          running: true
+        });
+      
+        const ok = await resolveCaptchaSequence({ zeroPhoto: true });
+      
+        if (ok) {
+          console.warn("[BG] ZERO-PHOTO captcha cleared, continuing transfer.");
+        } else {
+          console.warn("[BG] ZERO-PHOTO captcha unresolved, album will be skipped and batch will proceed.");
+        }
+      
+        return;
+      }
+    
+    
 
       if (msg?.type === "TRANSFER_ALL_GALLERIES") {
         const { domain, delayMs, projectIds } = msg;
@@ -420,16 +582,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
            const safeDelay = Number(delayMs) || 0;
            const overallStartedAt = Date.now();
            let globalTotal = 0;
-           
-           // NEW: Array to hold detailed stats for every album in this run
+           let globalSuccessCount = 0; // <--- FIX ISSUE 1: Track successes globally
            const sessionLogs = [];
 
+           // 1. Get Tab
+           const targetTab = await findPicTimeTab();
+           let targetTabId;
+           if (targetTab) {
+               targetTabId = targetTab.id;
+           } else {
+               const newTab = await chrome.tabs.create({ url: `https://${domain}.pic-time.com/professional#dash` });
+               targetTabId = newTab.id;
+               await new Promise(r => setTimeout(r, 4000));
+           }
+
            for (const g of galleries) {
-               // Wait if previous or current is paused/running
+               // 2. Wait if paused before starting next album
                while (true) {
                    const st = (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] || {};
-                   if (!st.running) break;
-                   await new Promise(resolve => setTimeout(resolve, 1000));
+                   if (!st.running && !st.paused) break; 
+                   if (st.paused) { 
+                       await new Promise(r => setTimeout(r, 1000)); 
+                   } else if (st.running) {
+                       await new Promise(r => setTimeout(r, 1000));
+                   } else {
+                       break;
+                   }
                }
 
                const count = Number(g.mediaCount || 0);
@@ -448,69 +626,94 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                  delayMs: safeDelay,
                  domain
                });
-   
-               const galleryUrl = `https://${domain}.pic-time.com/professional#dash|prj_${g.projectId}|photos`;
-               const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-               let targetTabId;
-               if (tab?.id) {
-                   await chrome.tabs.update(tab.id, { url: galleryUrl });
-                   targetTabId = tab.id;
-               } else {
-                   const newTab = await chrome.tabs.create({ url: galleryUrl });
-                   targetTabId = newTab.id;
-               }
                
-               await new Promise(resolve => setTimeout(resolve, 2500));
+               let albumDone = false;
                
-               chrome.tabs.sendMessage(targetTabId, {
-                   type: "FETCH_AND_TRANSFER",
-                   projectId: g.projectId,
-                   albumName: g.name,
-                   count
-               });
+               // --- THE RETRY LOOP FOR SETUP PHASE ---
+               while (!albumDone) {
+                   
+                   // A. Send the command
+                   console.log(`[bg] Requesting album: ${g.name}`);
+                   chrome.tabs.sendMessage(targetTabId, {
+                       type: "FETCH_AND_TRANSFER",
+                       projectId: g.projectId,
+                       albumName: g.name,
+                       count
+                   });
 
-               // Wait for this specific gallery to finish
-               while (true) {
-                   const st = (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] || {};
-                   if (!st.running) {
-                       // NEW: Capture the final state of THIS album before loop continues
-                       sessionLogs.push({
-                           albumName: st.albumName,
-                           projectId: st.projectId,
-                           totalPhotos: st.total,
-                           successful: st.successes?.length || 0,
-                           failed: st.failures?.length || 0,
-                           startedAt: new Date(st.startedAt).toISOString(),
-                           finishedAt: new Date(st.updatedAt).toISOString(),
-                           failures: st.failures || [] // Detailed failure list for this album
-                       });
-                       break;
+                   // B. Wait for completion OR Captcha Pause
+                   while (true) {
+                       const st = (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] || {};
+                       
+                       // Case 1: Captcha Hit (Paused)
+                       if (st.paused && st.pausedReason === 'captcha') {
+                          // ... (Existing captcha logic omitted for brevity, keep as is) ...
+                          // Keep your existing Captcha loop logic here
+                          while (true) {
+                              const check = (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] || {};
+                              if (!check.paused) {
+                                  if (!check.running) albumDone = true; 
+                                  break;
+                              }
+                              await new Promise(r => setTimeout(r, 1000));
+                          }
+                          if (albumDone) break;
+                          console.log("[bg] Captcha fixed. RE-TRYING ALBUM SETUP.");
+                          break; 
+                       }
+
+                       // Case 2: User Pause
+                       if (st.paused && st.pausedReason === 'user') {
+                           await new Promise(r => setTimeout(r, 1000));
+                           continue;
+                       }
+
+                       // Case 3: Finished (Running became false)
+                       if (!st.running) {
+                           // Log stats
+                           const sCount = st.successes?.length || 0;
+                           globalSuccessCount += sCount; // <--- FIX ISSUE 1: Add to global
+
+                           sessionLogs.push({
+                               albumName: st.albumName,
+                               projectId: st.projectId,
+                               totalPhotos: st.total,
+                               successful: sCount,
+                               failed: st.failures?.length || 0,
+                               failures: st.failures || [] 
+                           });
+                           albumDone = true; // Exit retry loop
+                           break;
+                       }
+
+                       // Standard wait
+                       await new Promise(r => setTimeout(r, 1000));
                    }
-                   await new Promise(resolve => setTimeout(resolve, 1000));
                }
            }
-
-            const storedFailsObj = await chrome.storage.local.get(KEY_ALL_FAILURES);
-            const allFailures = storedFailsObj[KEY_ALL_FAILURES] || [];
-            const totalFailed = allFailures.length;
-  
-            const lastRunSummary = {
-              running: false,
-              projectId: totalFailed === 1 ? allFailures[0].projectId : "—",
-              albumName: galleries.length > 1 ? `${galleries.length} Albums Processed` : galleries[0]?.name || "—",
-              total: globalTotal,
-              completed: globalTotal, // Assuming run finished
-              successes: [], // We don't keep global success list to save memory, usually
-              failures: allFailures,
-              startedAt: overallStartedAt,
-              updatedAt: Date.now(),
-              delayMs: safeDelay,
-              domain,
-              allFailures,
-              totalFailed,
-              sessionLogs // <--- NEW: The detailed breakdown
-            };
-            await chrome.storage.local.set({ [KEY_LAST_RUN]: lastRunSummary });
+           
+           // Final Cleanup
+           const storedFailsObj = await chrome.storage.local.get(KEY_ALL_FAILURES);
+           const allFailures = storedFailsObj[KEY_ALL_FAILURES] || [];
+           
+           const lastRunSummary = { 
+               running: false, 
+               projectId: "—", 
+               albumName: "Batch Complete", 
+               total: globalTotal, 
+               completed: globalTotal, 
+               // FIX ISSUE 1: Save the count (number) instead of empty array
+               successes: globalSuccessCount, 
+               failures: allFailures, 
+               startedAt: overallStartedAt, 
+               updatedAt: Date.now(), 
+               delayMs: safeDelay, 
+               domain, 
+               allFailures, 
+               totalFailed: allFailures.length, 
+               sessionLogs 
+           };
+           await chrome.storage.local.set({ [KEY_LAST_RUN]: lastRunSummary });
 
         })().catch(console.error);
 
@@ -580,7 +783,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             for (const key of groupKeys) {
                 const { projectId, albumName, filenames } = groups[key];
                 
-                // wait loop
                 while (true) {
                    const st = (await chrome.storage.local.get(KEY_TRANSFER))[KEY_TRANSFER] || {};
                    if (!st.running) break;
@@ -601,7 +803,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                    domain
                 });
                 
-                // ... open tab logic ...
                 const galleryUrl = `https://${domain}.pic-time.com/professional#dash|prj_${projectId}|photos`;
                 const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
                 let targetTabId = tab?.id ? tab.id : (await chrome.tabs.create({ url: galleryUrl })).id;

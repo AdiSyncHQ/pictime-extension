@@ -7,7 +7,8 @@
     "host_permissions": [
        "*://*.pic-time.com/*",
        "*://*.a02.azurefd.net/*",
-       "*://*.google.com/*"
+       "*://*.google.com/*",
+        "https://pic-time-backend-448778667929.us-central1.run.app/*"
     ],
     "action": {
       "default_title": "Pic-Time Sniffer",

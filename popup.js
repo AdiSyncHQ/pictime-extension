@@ -135,6 +135,7 @@ function applyTransferStateToButtons(state) {
 }
 
 function renderTransferPanel(state) {
+  // 1. Basic Visibility Check
   if (!state || (!state.running && state.total === 0 && state.completed === 0)) {
     if (TRANSFER_PANEL) TRANSFER_PANEL.style.display = "none";
     return;
@@ -146,6 +147,7 @@ function renderTransferPanel(state) {
   const safeCompleted = completed || 0;
   const pct = safeTotal > 0 ? Math.round((safeCompleted / safeTotal) * 100) : 0;
 
+  // Reset speed stats if starting new
   if (running && safeCompleted === 0) {
     lastSpeedSample = null;
     lastCompleted = null;
@@ -155,99 +157,136 @@ function renderTransferPanel(state) {
 
   if (TRANSFER_BAR) TRANSFER_BAR.style.width = `${pct}%`;
 
+  // --- MAIN LOGIC ---
   if (running) {
-    if (paused) {
-        if (TRANSFER_BAR) {
-            TRANSFER_BAR.style.animation = "none";
-        }
-
-        if (pausedReason === 'network') {
-            if (TRANSFER_BAR) TRANSFER_BAR.style.backgroundColor = "#ef4444"; 
-
-            if (TRANSFER_PROGRESS) {
-                TRANSFER_PROGRESS.className = "status-network"; 
-                TRANSFER_PROGRESS.textContent = "Waiting for Internet...";
-            }
-            if (TRANSFER_ETA) TRANSFER_ETA.textContent = "Auto-resuming when online";
-
-            if (PAUSE_RESUME_BTN) {
-                PAUSE_RESUME_BTN.textContent = "Connecting...";
-                PAUSE_RESUME_BTN.className = "btn-control waiting-style"; 
-                PAUSE_RESUME_BTN.disabled = true;
-            }
-
-        } else {
-            if (TRANSFER_BAR) TRANSFER_BAR.style.backgroundColor = "#f59e0b"; 
-
-            if (TRANSFER_PROGRESS) {
-                TRANSFER_PROGRESS.className = "status-paused"; 
-                TRANSFER_PROGRESS.textContent = "Transfer Paused";
-            }
-            if (TRANSFER_ETA) TRANSFER_ETA.textContent = "Resumed by user action";
-
-            if (PAUSE_RESUME_BTN) {
-                PAUSE_RESUME_BTN.textContent = "Resume";
-                PAUSE_RESUME_BTN.className = "btn-control resume-style"; 
-                PAUSE_RESUME_BTN.disabled = false;
-                PAUSE_RESUME_BTN.onclick = async () => {
-                    PAUSE_RESUME_BTN.textContent = "Starting...";
-                    await chrome.runtime.sendMessage({ type: "RESUME_TRANSFER" });
-                };
-            }
-        }
-    } else {
-        if (TRANSFER_BAR) {
-            TRANSFER_BAR.style.backgroundColor = ""; 
-            TRANSFER_BAR.style.animation = ""; 
-        }
-
-        if (TRANSFER_PROGRESS) {
-            TRANSFER_PROGRESS.className = ""; 
-            TRANSFER_PROGRESS.textContent = `Transferring "${albumName || "Unknown"}"`;
-        }
-
-        const etaSeconds = estimateEta(safeTotal, safeCompleted);
-        if (etaSeconds && etaSeconds > 0) lastStableEta = formatEta(etaSeconds);
-        
-        if (TRANSFER_ETA) {
-             TRANSFER_ETA.textContent = `${pct}% completed • ${lastStableEta || "Calculating..."}`;
-        }
-
-        if (PAUSE_RESUME_BTN) {
-            PAUSE_RESUME_BTN.textContent = "Pause";
-            PAUSE_RESUME_BTN.className = "btn-control pause-style"; 
-            PAUSE_RESUME_BTN.disabled = false;
-            PAUSE_RESUME_BTN.onclick = async () => {
-                PAUSE_RESUME_BTN.textContent = "Pausing...";
-                await chrome.runtime.sendMessage({ type: "PAUSE_TRANSFER" });
-            };
-        }
-    }
-  } else {
-    if (TRANSFER_PROGRESS) {
-        TRANSFER_PROGRESS.className = "";
-        TRANSFER_PROGRESS.textContent = "Transfer Complete";
-    }
-    if (TRANSFER_ETA) TRANSFER_ETA.textContent = `${safeTotal} images processed`;
     
-    if (PAUSE_RESUME_BTN) PAUSE_RESUME_BTN.style.display = "none";
+    // --- FIX (Issue 2): Hide Clear Button while running ---
+    if (CLEAR_TRANSFER_BTN) CLEAR_TRANSFER_BTN.style.display = "none";
+
+    // A. PAUSED STATE
+    if (paused) {
+      if (TRANSFER_BAR) TRANSFER_BAR.style.animation = "none";
+
+      // Network Pause
+      if (pausedReason === "network") {
+        if (TRANSFER_BAR) TRANSFER_BAR.style.backgroundColor = "#ef4444"; 
+        if (TRANSFER_PROGRESS) {
+          TRANSFER_PROGRESS.className = "status-network"; 
+          TRANSFER_PROGRESS.textContent = "Waiting for Internet...";
+        }
+        if (TRANSFER_ETA) TRANSFER_ETA.textContent = "Auto-resuming when online";
+        if (PAUSE_RESUME_BTN) {
+          PAUSE_RESUME_BTN.textContent = "Connecting...";
+          PAUSE_RESUME_BTN.className = "btn-control waiting-style"; 
+          PAUSE_RESUME_BTN.disabled = true;
+        }
+
+      // Captcha Pause
+      } else if (pausedReason === "captcha") {
+        if (TRANSFER_BAR) TRANSFER_BAR.style.backgroundColor = "#f59e0b";
+        if (TRANSFER_PROGRESS) {
+          TRANSFER_PROGRESS.className = "status-paused";
+          TRANSFER_PROGRESS.textContent = "Captcha detected – solving…";
+        }
+        if (TRANSFER_ETA) TRANSFER_ETA.textContent = "Auto-resuming after captcha block";
+        if (PAUSE_RESUME_BTN) {
+          PAUSE_RESUME_BTN.textContent = "Solving…";
+          PAUSE_RESUME_BTN.className = "btn-control waiting-style";
+          PAUSE_RESUME_BTN.disabled = true;
+          PAUSE_RESUME_BTN.onclick = null; 
+        }
+
+      // User Pause
+      } else {
+        if (TRANSFER_BAR) TRANSFER_BAR.style.backgroundColor = "#f59e0b"; 
+        if (TRANSFER_PROGRESS) {
+          TRANSFER_PROGRESS.className = "status-paused"; 
+          TRANSFER_PROGRESS.textContent = "Transfer Paused";
+        }
+        if (TRANSFER_ETA) TRANSFER_ETA.textContent = "Paused • Waiting for user to resume";
+        if (PAUSE_RESUME_BTN) {
+          PAUSE_RESUME_BTN.textContent = "Resume";
+          PAUSE_RESUME_BTN.className = "btn-control resume-style"; 
+          PAUSE_RESUME_BTN.disabled = false;
+          PAUSE_RESUME_BTN.onclick = async () => {
+            PAUSE_RESUME_BTN.textContent = "Starting...";
+            await chrome.runtime.sendMessage({ type: "RESUME_TRANSFER" });
+          };
+        }
+      }
+
+    // B. ACTIVE RUNNING STATE
+    } else {
+      if (TRANSFER_BAR) {
+        TRANSFER_BAR.style.backgroundColor = "";
+        TRANSFER_BAR.style.animation = ""; 
+      }
+
+      if (TRANSFER_PROGRESS) {
+        TRANSFER_PROGRESS.className = "";
+        TRANSFER_PROGRESS.textContent = `Transferring "${albumName || "Unknown"}"`;
+      }
+
+      const etaSeconds = estimateEta(safeTotal, safeCompleted);
+      if (etaSeconds && etaSeconds > 0) {
+        lastStableEta = formatEta(etaSeconds);
+      }
+
+      if (TRANSFER_ETA) {
+        TRANSFER_ETA.textContent = `${pct}% completed • ${lastStableEta || "Calculating..."}`;
+      }
+
+      if (PAUSE_RESUME_BTN) {
+        PAUSE_RESUME_BTN.textContent = "Pause";
+        PAUSE_RESUME_BTN.className = "btn-control pause-style";
+        PAUSE_RESUME_BTN.disabled = false;
+        PAUSE_RESUME_BTN.onclick = async () => {
+          PAUSE_RESUME_BTN.textContent = "Pausing...";
+          await chrome.runtime.sendMessage({ type: "PAUSE_TRANSFER" });
+        };
+      }
+    }
+
+  // --- FINISHED STATE ---
+  } else {
+    // --- FIX (Issue 2): Show Clear Button when finished ---
+    if (CLEAR_TRANSFER_BTN) CLEAR_TRANSFER_BTN.style.display = "block";
+
+    if (TRANSFER_PROGRESS) {
+      TRANSFER_PROGRESS.className = "";
+      TRANSFER_PROGRESS.textContent = "Transfer Complete";
+    }
+
+    if (TRANSFER_ETA) {
+      TRANSFER_ETA.textContent = `${safeTotal} images processed`;
+    }
+
+    if (PAUSE_RESUME_BTN) {
+      PAUSE_RESUME_BTN.style.display = "none";
+    }
   }
 
+  // Update Failures List
   if (failures && failures.length) {
     const firstFive = failures.slice(0, 5);
     const more = failures.length > 5 ? ` (+${failures.length - 5} more)` : "";
-    if (TRANSFER_FAILURES) TRANSFER_FAILURES.textContent = "Failed: " + firstFive.map((f) => f.filename).join(", ") + more;
+    if (TRANSFER_FAILURES) {
+      TRANSFER_FAILURES.textContent = 
+        "Failed: " + firstFive.map(f => f.filename).join(", ") + more;
+    }
   } else {
     if (TRANSFER_FAILURES) TRANSFER_FAILURES.textContent = "";
   }
-  
+
   applyTransferStateToButtons(state);
 }
+
 
 function renderLastRunSummary(state) {
   if (!LAST_RUN_CONTAINER) return;
   LAST_RUN_CONTAINER.style.display = "block";
 
+  // Case 1: Transfer is currently running
   if (state && state.running) {
     if (LAST_RUN_TEXT) LAST_RUN_TEXT.innerHTML = `<div>Transfer in progress…</div>`;
     if (LAST_RUN_FAILURES_LIST) LAST_RUN_FAILURES_LIST.textContent = "";
@@ -256,6 +295,7 @@ function renderLastRunSummary(state) {
     return;
   }
   
+  // Case 2: No history
   if (!state || state.total === 0) {
       if (LAST_RUN_TEXT) LAST_RUN_TEXT.innerHTML = `<div>No previous transfers recorded.</div>`;
       if (RETRY_FAILED_BTN) RETRY_FAILED_BTN.disabled = true;
@@ -263,10 +303,13 @@ function renderLastRunSummary(state) {
       return;
   }
 
+  // Case 3: Display Summary
   if (DOWNLOAD_LOG_BTN) DOWNLOAD_LOG_BTN.style.display = "block"; 
 
   const { albumName, projectId, total, successes, failures, startedAt, updatedAt } = state;
-  const okCount = successes?.length || 0;
+  
+  // --- FIX (Issue 1): Handle both Array (Single Run) and Number (Batch Run) ---
+  const okCount = Array.isArray(successes) ? successes.length : (Number(successes) || 0);
   const failCount = failures?.length || 0;
 
   if (LAST_RUN_TEXT) {
