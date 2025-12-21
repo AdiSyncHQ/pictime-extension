@@ -3,14 +3,29 @@
   <head>
     <meta charset="utf-8" />
     <title>Pic-Time Sniffer</title>
+
+    <!-- =======================================================================
+         popup.css = all UI styling  
+         ======================================================================= -->
     <link rel="stylesheet" href="popup.css" />
   </head>
 
   <body>
+    <!-- =======================================================================
+         MAIN SHELL WRAPPER
+         Contains app header, controls, gallery list, transfer UI, etc.
+         ======================================================================= -->
     <div class="shell">
       <div class="shell-inner">
+
+        <!-- -------------------------------------------------------------------
+             DARK MODE TOGGLE
+             ------------------------------------------------------------------- -->
         <button id="darkToggle" aria-label="Toggle dark mode">🌙</button>
 
+        <!-- -------------------------------------------------------------------
+             APP HEADER
+             ------------------------------------------------------------------- -->
         <header class="app-header">
           <div class="app-badge">PT</div>
           <div class="app-title-block">
@@ -19,34 +34,55 @@
           </div>
         </header>
 
+        <!-- -------------------------------------------------------------------
+             STATUS BAR
+             Shows current capture status
+             ------------------------------------------------------------------- -->
         <div id="status">Waiting to capture...</div>
 
+        <!-- ===================================================================
+             SECTION: DASHBOARD URL
+             User enters subdomain → extension navigates to Pic-Time dashboard
+             =================================================================== -->
         <div class="section">
           <div class="section-label">Pic-Time Dashboard URL</div>
+
           <div class="url-input">
             <div class="url-input-prefix">Subdomain</div>
+
             <div class="url-input-main">
               <input id="subdomainInput" type="text" placeholder="pictime domain" />
               <span>.pic-time.com/professional#dash</span>
             </div>
           </div>
+
           <button id="startBtn">Start Capture</button>
         </div>
 
+        <!-- ===================================================================
+             TOOLBAR: Refresh / Clear
+             =================================================================== -->
         <div class="toolbar">
           <button id="refreshBtn">
             <span class="icon">🔁</span>
             <span>Sync Galleries</span>
           </button>
+
           <button id="clearBtn">
             <span class="icon">🧹</span>
             <span>Clear History</span>
           </button>
         </div>
 
+        <!-- ===================================================================
+             SECTION: BATCH OPERATIONS
+             Bulk transfer + delay control
+             =================================================================== -->
         <div class="section">
           <div class="section-label">Batch Operations</div>
+
           <div class="bulk-row" style="display:flex; gap:8px; align-items:center;">
+            <!-- Transfer Selected Button -->
             <button
               id="transferSelectedBtn"
               class="btn-secondary"
@@ -56,13 +92,12 @@
               Select galleries...
             </button>
 
+            <!-- Delay Input -->
             <div class="delay-col" style="display:flex; flex-direction:column; gap:2px; width:120px;">
-              <label
-                for="delayInput"
-                style="font-size:11px; color:#9ca3af;"
-              >
+              <label for="delayInput" style="font-size:11px; color:#9ca3af;">
                 Delay per image (ms)
               </label>
+
               <input
                 id="delayInput"
                 type="number"
@@ -73,27 +108,45 @@
               />
             </div>
           </div>
-          <div class="note">
-            Set a delay to reduce captchas. 0 = no delay.
-          </div>
+
+          <div class="note">Set a delay to reduce captchas. 0 = no delay.</div>
         </div>
 
+        <!-- ===================================================================
+             TRANSFER PANEL
+             Live progress bar + pause/resume + failures
+             =================================================================== -->
         <div id="transferPanel">
           <div id="transferTitle">Transfer status</div>
-          <div id="transferBarContainer"><div id="transferBar"></div></div>
-          
+
+          <div id="transferBarContainer">
+            <div id="transferBar"></div>
+          </div>
+
           <div class="transfer-controls" style="display:flex; justify-content:space-between; align-items:flex-start;">
-             <div>
-                <div id="transferProgress"></div>
-                <div id="transferEta" class="transfer-eta" style="font-size:12px; color:#6b7280; margin-top:2px;"></div>
-             </div>
-             <button id="pauseResumeBtn" class="btn-secondary" style="min-width:70px;">Pause</button>
+            <div>
+              <div id="transferProgress"></div>
+              <div
+                id="transferEta"
+                class="transfer-eta"
+                style="font-size:12px; color:#6b7280; margin-top:2px;"
+              ></div>
+            </div>
+
+            <button id="pauseResumeBtn" class="btn-secondary" style="min-width:70px;">
+              Pause
+            </button>
           </div>
 
           <div id="transferFailures"></div>
+
           <button id="clearTransferBtn">✨ Clear transfer log</button>
         </div>
 
+        <!-- ===================================================================
+             LAST RUN SUMMARY PANEL
+             Collapsible summary + retry failed + export log
+             =================================================================== -->
         <div id="lastRunContainer" class="section last-run">
           <div id="lastRunHeader" class="last-run-header">
             <div class="lr-title">
@@ -103,7 +156,7 @@
             <span id="lastRunChevron" class="lr-chevron">▾</span>
           </div>
 
-          <div id="lastRunBody" class="last-run-body" style="display: none;">
+          <div id="lastRunBody" class="last-run-body" style="display:none;">
             <div id="lastRunText" class="lr-text"></div>
             <div id="lastRunFailuresList" class="lr-failures"></div>
 
@@ -115,24 +168,38 @@
           </div>
         </div>
 
+        <!-- ===================================================================
+             GALLERY LIST HEADER
+             Shows "Captured Galleries" + Select All toggle
+             =================================================================== -->
         <div class="galleries-header">
           <div class="galleries-title">Captured Galleries</div>
+
           <div class="select-all-wrap">
             <input type="checkbox" id="selectAllBox" />
             <label for="selectAllBox">Select All</label>
           </div>
         </div>
 
+        <!-- Captured galleries populate here dynamically -->
         <div id="galleries"></div>
       </div>
     </div>
 
+    <!-- =======================================================================
+         ADVANCED OPTIONS PANEL (collapsed by default)
+         Includes:
+           • Upload concurrency
+           • Backend auth key
+           • Debug: Clear whole cache
+         ======================================================================= -->
     <div id="advancedToggle">Advanced options ▾</div>
 
     <div id="advancedPanel">
       <div style="margin-bottom:4px; font-size:12px; color:#4b5563;">
         Upload Concurrency (1-10)
       </div>
+
       <input
         id="concurrencyInput"
         type="number"
@@ -145,18 +212,18 @@
       <div style="margin-bottom:8px; font-size:12px; color:#4b5563;">
         Backend auth key
       </div>
-      <input
-        id="authTokenInput"
-        type="password"
-        placeholder="Paste secret key"
-      />
+
+      <input id="authTokenInput" type="password" placeholder="Paste secret key" />
+
       <button id="saveAuthBtn">💾 Save backend auth key</button>
 
       <button id="debugClearStorage">⚠️ Clear Extension Cache</button>
     </div>
 
+    <!-- Small toast notification container -->
     <div id="toast"></div>
 
+    <!-- Scripts -->
     <script src="popup.js"></script>
     <script src="ui.js"></script>
   </body>

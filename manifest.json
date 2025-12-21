@@ -1,14 +1,14 @@
 {
     "manifest_version": 3,
     "name": "Pic-Time Downloader",
-    "version": "1.2.1",
+    "version": "1.2.3",
     "description": "Opens a URL, captures the dashboard POST JSON, and shows projects in the popup with persistence.",
     "permissions": ["downloads.open", "storage","downloads","tabs","scripting","activeTab"],
     "host_permissions": [
        "*://*.pic-time.com/*",
        "*://*.a02.azurefd.net/*",
        "*://*.google.com/*",
-        "https://pic-time-backend-448778667929.us-central1.run.app/*"
+        "https://migration-backend-223066796377.us-central1.run.app/*"
     ],
     "action": {
       "default_title": "Pic-Time Sniffer",
